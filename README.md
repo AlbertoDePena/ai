@@ -31,7 +31,7 @@ Please add a session summary to AGENT.md summarizing what we've done so far.
 ### Critical: Framework Consistency
 
 - Never clear history without saving context first. 
-- Run the session summary prompt before using /clear - this step is non-negotiable. Without it, all project progress and insights vanish forever.
+- Run the session summary prompt before using `/clear` - this step is non-negotiable. Without it, all project progress and insights vanish forever.
 
 ### Framework synchronization 
 
@@ -41,5 +41,5 @@ Please add a session summary to AGENT.md summarizing what we've done so far.
 
 ### Quality check
 
-- After major changes, prompt Claude with “Review all four framework files for consistency and flag any contradictions.”
+- After major changes, prompt Claude with `Review all four framework files for consistency and flag any contradictions.`
 
