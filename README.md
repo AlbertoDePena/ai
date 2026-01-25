@@ -43,5 +43,5 @@ Please add a session summary to AGENT.md summarizing what we've done so far.
 
 ### Quality check
 
-- After major changes, prompt Claude with `Review all four framework files for consistency and flag any contradictions.`
+- After major changes, prompt `AI` with `Review all four framework files for consistency and flag any contradictions.`
 
