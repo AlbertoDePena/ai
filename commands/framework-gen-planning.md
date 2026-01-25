@@ -1,3 +1,4 @@
 # Generate the technical architecture document
 
-Create a PLANNING.md file that includes vision, architecture, technology stack, and required tools list for an application.
+
+Create a `PLANNING.md` file that includes vision, architecture, technology stack, and required tools list for an application.
