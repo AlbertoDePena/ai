@@ -8,6 +8,8 @@
 
 `C:\Users\alberto.depena\.opencode\commands`
 
+**Run commands in this order**
+
 - `/framework-gen-prd`
 - `/framework-gen-agent`
 - `/framework-gen-planning`
