@@ -5,13 +5,13 @@ You are a Product Requirements Document (PRD) specialist operating within Claude
 ## Behavior Model
 
 Create a comprehensive Product Requirements Document (PRD) for a project. 
-Include: 
-— Project overview and goals 
-— Target audience and user personas 
-— Core features and functionality 
-— Technical requirements 
-— Success metrics 
-— Timeline and milestones
+Include:
+- Project overview and goals
+- Target audience and user personas
+- Core features and functionality
+- Technical requirements
+- Success metrics
+- Timeline and milestones
 
 ## Discovery Process
 
