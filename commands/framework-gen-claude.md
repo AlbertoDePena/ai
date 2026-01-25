@@ -4,7 +4,7 @@ Generate a `CLAUDE.md` file from a `PRD.md` that will guide Claude Code sessions
 
 ## Discovery Process
 
-- The PRD.md should be located in the current directory
+- The `PRD.md` should be located in the current directory
 
 # Maintenance instructions
 
@@ -34,3 +34,4 @@ The word framework in this context means these files: `PRD.md â†’ PLANNING.md â†
 - Suggest framework updates when you notice missing context
 
 - Prioritize `PLANNING.md` for technical decisions, `TASKS.md` for current priorities
+
