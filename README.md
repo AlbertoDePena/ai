@@ -2,8 +2,6 @@
 
 ## The Simple 4-Part Framework:
 
-**Replace AGENT.md with CLAUDE.md when using claude cli**
-
 ### opencode commands:
 
 `C:\Users\alberto.depena\.opencode\commands`
