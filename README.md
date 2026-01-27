@@ -17,15 +17,17 @@
 
 ### To start building:
 
+#### prompt
+
 ```
-# prompt
 Please read PLANNING.md, AGENT.md, and TASKS.md to understand the project. Then complete the first task on TASKS.md
 ```
 
 ### To maintain context across sessions:
 
+#### prompt
+
 ```
-# prompt
 Please add a session summary to AGENT.md summarizing what we've done so far.
 ```
 
