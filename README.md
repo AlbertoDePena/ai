@@ -29,13 +29,13 @@
 #### opencode prompt
 
 ```
-Please read PLANNING.md, AGENT.md, and TASKS.md to understand the project. Then complete the first task on TASKS.md
+Please read PLANNING.md, AGENT.md, and TASKS.md to understand the project. Then complete the next task on TASKS.md
 ```
 
 #### claude prompt
 
 ```
-Please read PLANNING.md, CLAUDE.md, and TASKS.md to understand the project. Then complete the first task on TASKS.md
+Please read PLANNING.md, CLAUDE.md, and TASKS.md to understand the project. Then complete the next task on TASKS.md
 ```
 
 ### To maintain context across sessions:
