@@ -16,8 +16,8 @@
 │   │   │   └── error.go             # Domain-specific error types
 │   │   │
 │   │   ├── usecase/                 # Driving ports + implementations
-│   │   │   ├── create_order.go      # CreateOrderUseCase interface + createOrderUseCase struct
-│   │   │   └── get_order.go         # GetOrderUseCase interface + getOrderUseCase struct
+│   │   │   ├── create_order.go      # CreateOrderUseCase interface + CreateOrder struct
+│   │   │   └── get_order.go         # GetOrderUseCase interface + GetOrder struct
 │   │   │
 │   │   ├── repository/              # Driven ports (interfaces — pure contracts)
 │   │   │   └── order.go             # OrderRepository interface
@@ -68,7 +68,7 @@
 | Artifact | Convention | Example |
 |----------|-----------|---------|
 | Driving port (use case interface) | `<Verb><Noun>UseCase` interface | `CreateOrderUseCase` |
-| Use case struct | `<verb><Noun>UseCase` (lowercase, unexported) + constructor returning the interface | `createOrderUseCase` |
+| Use case struct | `<Verb><Noun>` (exported, no `UseCase` suffix — avoids stutter with the `usecase` package) + constructor returning concrete pointer | `CreateOrder` |
 | Use case params | `<Verb><Noun>Params` struct inside the use case file | `CreateOrderParams` |
 | Driven port | `<Noun>Repository`, `<Noun>Cache`, `<Noun>Publisher` interface | `OrderRepository` |
 | Driven port package | Concern name under `internal/core/` — `repository/`, `bus/`, `mail/` | `repository` |
@@ -199,19 +199,16 @@ type OrderItemParams struct {
     Quantity  int
 }
 
-// Ensure interface is implemented at compile time.
-var _ CreateOrderUseCase = (*createOrderUseCase)(nil)
-
-type createOrderUseCase struct {
+type CreateOrder struct {
     orderRepo repository.OrderRepository
 }
 
 // NewCreateOrderUseCase constructs the use case with its required driven ports.
-func NewCreateOrderUseCase(repo repository.OrderRepository) CreateOrderUseCase {
-    return &createOrderUseCase{orderRepo: repo}
+func NewCreateOrderUseCase(repo repository.OrderRepository) *CreateOrder {
+    return &CreateOrder{orderRepo: repo}
 }
 
-func (uc *createOrderUseCase) Execute(ctx context.Context, params CreateOrderParams) (*domain.Order, error) {
+func (uc *CreateOrder) Execute(ctx context.Context, params CreateOrderParams) (*domain.Order, error) {
     order := &domain.Order{
         ID:         newID(), // use a pkg/ helper, not an adapter
         CustomerID: params.CustomerID,
@@ -399,10 +396,12 @@ func main() {
     // Wire driven adapters
     orderRepo := postgres.NewOrderRepository(db)
 
-    // Wire use cases (core) — inject driven ports
+    // Wire use cases (core) — inject driven ports.
+    // Constructors return concrete pointers; interface satisfaction is enforced
+    // when passed to driving-adapter constructors that accept the interface type.
     createOrder := usecase.NewCreateOrderUseCase(orderRepo)
 
-    // Wire driving adapters — inject use case interfaces
+    // Wire driving adapters — inject use cases (accepted as interface types)
     kafkaCons := kafka.NewConsumer(createOrder)
     srv       := httpserver.NewServer(cfg, createOrder)
 

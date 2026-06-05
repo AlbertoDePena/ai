@@ -15,25 +15,31 @@
 Always assert that adapters implement their ports. Put this at the top of the adapter file.
 ```go
 var _ repository.OrderRepository = (*PostgresOrderRepository)(nil)
-
-// Inside internal/core/usecase/create_order.go (same package):
-// var _ CreateOrderUseCase = (*createOrderUseCase)(nil)
 ```
 This causes a build error the moment the contract drifts — no runtime surprise.
 
-### Pattern: Constructor returns the Interface, not the Struct
+For use cases, a `var _` check is not needed in the use case file. Interface satisfaction
+is enforced at the wiring point in `main.go`, where the concrete pointer is passed to a
+driving-adapter constructor that accepts the interface type (e.g., `NewOrderHandler(createOrder)`
+where the parameter type is `usecase.CreateOrderUseCase`).
+
+### Pattern: Constructor Returns a Concrete Pointer (Accept Interfaces, Return Structs)
 ```go
 // In internal/core/usecase/:
-// CORRECT — caller only knows the port
+// CORRECT — idiomatic Go: accept interfaces, return structs
+func NewCreateOrderUseCase(repo repository.OrderRepository) *CreateOrder {
+    return &CreateOrder{orderRepo: repo}
+}
+
+// WRONG — returns the interface, hiding the concrete type unnecessarily
 func NewCreateOrderUseCase(repo repository.OrderRepository) CreateOrderUseCase {
     return &createOrderUseCase{orderRepo: repo}
 }
-
-// WRONG — exposes implementation detail
-func NewCreateOrderUseCase(repo repository.OrderRepository) *createOrderUseCase {
-    return &createOrderUseCase{orderRepo: repo}
-}
 ```
+Returning the concrete pointer lets callers access the full type when needed (e.g., in tests).
+Consumers (handlers, other adapters) still depend on the driving port interface — they accept
+`usecase.CreateOrderUseCase`, not the struct. Interface satisfaction is verified at compile time
+when the pointer is passed to a constructor that accepts the interface.
 
 ### Pattern: DTO Translation at the Adapter Boundary
 Adapters own translation. Domain objects never contain JSON tags or HTTP concepts.
@@ -92,7 +98,7 @@ import "github.com/gin-gonic/gin" // HTTP framework in core
 
 ### ❌ Anti-pattern: Fat use case that calls the DB directly
 ```go
-func (uc *createOrderUseCase) Execute(ctx context.Context, cmd ...) {
+func (uc *CreateOrder) Execute(ctx context.Context, cmd ...) {
     db.ExecContext(ctx, "INSERT INTO orders ...")  // WRONG
 }
 ```
@@ -173,7 +179,7 @@ internal/
 
 1. **Extract domain entities** → move pure structs + business methods to `internal/core/domain/`.
 2. **Define driven ports** → create `internal/core/repository/order.go` (and `core/bus/`, `core/mail/` etc. as needed); copy the method signatures from the concrete repo.
-3. **Define driving ports** → create the use case interface alongside its implementation in `internal/core/usecase/`; export the interface, keep the struct unexported.
+3. **Define driving ports** → create the use case interface alongside its implementation in `internal/core/usecase/`; export both the interface and the struct. The struct name drops the `UseCase` suffix (e.g., `CreateOrder`); the constructor returns a concrete pointer `*CreateOrder`.
 4. **Refactor service → use case** → move to `internal/core/usecase/`; replace concrete repo with the driven port interface; strip any HTTP/DB imports.
 5. **Refactor repo → adapter** → move to `internal/adapter/postgres/`; add compile-time check; ensure it returns domain types (add mapping if needed).
 6. **Refactor handler → adapter** → move to `internal/adapter/http/handler/`; extract DTOs to `dto/`; inject use case interface.
