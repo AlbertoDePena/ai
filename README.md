@@ -12,6 +12,7 @@
 - `/framework-gen-agent`
 - `/framework-gen-planning`
 - `/framework-gen-tasks`
+- `/framework-exec-task`
 
 ### claude commands:
 
@@ -23,19 +24,14 @@
 - `/framework-gen-claude`
 - `/framework-gen-planning`
 - `/framework-gen-tasks`
+- `/framework-exec-task`
 
 ### To start building:
 
-#### opencode prompt
+#### opencode/claude prompt
 
 ```
-Please read PLANNING.md, AGENT.md, and TASKS.md to understand the project. Then complete the next task on TASKS.md
-```
-
-#### claude prompt
-
-```
-Please read PLANNING.md, CLAUDE.md, and TASKS.md to understand the project. Then complete the next task on TASKS.md
+/framework-exec-task
 ```
 
 ### To maintain context across sessions:
