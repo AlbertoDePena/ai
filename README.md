@@ -13,6 +13,7 @@
 - `/framework-gen-planning`
 - `/framework-gen-tasks`
 - `/framework-exec-task`
+- `/framework-session-summary`
 
 ### claude commands:
 
@@ -25,6 +26,7 @@
 - `/framework-gen-planning`
 - `/framework-gen-tasks`
 - `/framework-exec-task`
+- `/framework-session-summary`
 
 ### To start building:
 
@@ -36,16 +38,10 @@
 
 ### To maintain context across sessions:
 
-#### opencode prompt
+#### opencode/claude prompt
 
 ```
-Please add a session summary to AGENT.md summarizing what we've done so far.
-```
-
-#### claude prompt
-
-```
-Please add a session summary to CLAUDE.md summarizing what we've done so far.
+/framework-session-summary
 ```
 
 ### Critical: Framework Consistency
