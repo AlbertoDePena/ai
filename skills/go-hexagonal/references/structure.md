@@ -72,7 +72,7 @@
 | Use case params | `<Verb><Noun>Params` struct inside the use case file | `CreateOrderParams` |
 | Driven port | `<Noun>Repository`, `<Noun>Cache`, `<Noun>Publisher` interface | `OrderRepository` |
 | Driven port package | Concern name under `internal/core/` — `repository/`, `bus/`, `mail/` | `repository` |
-| Adapter (single role) | `<Technology><Noun>Repository`, `<Technology><Noun>Handler` | `PostgresOrderRepository` |
+| Adapter (single role) | `<Noun>Repository`, `<Noun>Handler` — the technology package name disambiguates (e.g. `postgres.OrderRepository`, `http/handler.OrderHandler`) | `postgres.OrderRepository` |
 | Adapter file (dual-role) | `<role>.go` — `consumer.go`, `producer.go` inside a technology package | `kafka/consumer.go`, `kafka/producer.go` |
 | DTO | `<Noun>Request`, `<Noun>Response` | `CreateOrderRequest` |
 | Domain entity | Capitalized noun, no suffix | `Order`, `Customer` |
@@ -120,7 +120,7 @@ package domain
 import "errors"
 
 var (
-    ErrOrderNotFound       = errors.New("order not found")
+    ErrOrderNotFound         = errors.New("order not found")
     ErrOrderAlreadyConfirmed = errors.New("order already confirmed")
 )
 ```
@@ -344,6 +344,7 @@ package kafka
 import (
     "context"
     "encoding/json"
+    "fmt"
 
     "<module>/internal/core/bus"
     "<module>/internal/core/domain"
@@ -360,8 +361,12 @@ func NewProducer() *Producer {
 
 var _ bus.OrderEventPublisher = (*Producer)(nil)
 
-func (p *Producer) Publish(ctx context.Context, event domain.OrderEvent) error {
-    data, _ := json.Marshal(event)
+func (p *Producer) Publish(ctx context.Context, event domain.Order) error {
+    data, err := json.Marshal(event)
+    if err != nil {
+        return fmt.Errorf("marshal order event: %w", err)
+    }
+    _ = data
     // publish to Kafka topic
     return nil
 }
@@ -402,8 +407,11 @@ func main() {
     createOrder := usecase.NewCreateOrderUseCase(orderRepo)
 
     // Wire driving adapters — inject use cases (accepted as interface types)
-    kafkaCons := kafka.NewConsumer(createOrder)
-    srv       := httpserver.NewServer(cfg, createOrder)
+    srv := httpserver.NewServer(cfg, createOrder)
+
+    // The Kafka consumer (driving adapter) is constructed here to demonstrate
+    // wiring; a real app would start it in its own goroutine (topic poll loop).
+    _ = kafka.NewConsumer(createOrder)
 
     log.Fatal(http.ListenAndServe(cfg.Addr, srv))
 }

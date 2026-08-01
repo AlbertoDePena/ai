@@ -14,7 +14,7 @@
 ### Pattern: Compile-time Interface Check
 Always assert that adapters implement their ports. Put this at the top of the adapter file.
 ```go
-var _ repository.OrderRepository = (*PostgresOrderRepository)(nil)
+var _ repository.OrderRepository = (*OrderRepository)(nil)
 ```
 This causes a build error the moment the contract drifts — no runtime surprise.
 
@@ -210,7 +210,7 @@ and step 5 (consumer), but it's the same package — just different files.
 
 1. Ensure the driven port interface is already in `core/repository/` (or `core/bus/`, etc.).
 2. Create `internal/adapter/postgres/<entity>_repository.go` implementing the port.
-3. Add compile-time check: `var _ repository.XRepository = (*PostgresXRepository)(nil)`.
+3. Add compile-time check: `var _ repository.XRepository = (*XRepository)(nil)`.
 4. In `main.go`, swap `mysql.NewXRepository(db)` → `postgres.NewXRepository(db)`.
 5. Delete the old adapter package.
 
@@ -223,6 +223,8 @@ Core and use cases are untouched.
 ### Unit-test use cases with mock driven ports
 ```go
 // usecase/create_order_test.go
+// Requires github.com/stretchr/testify (require/assert); the same test can be
+// written with the standard library's testing package if you'd rather avoid it.
 type mockOrderRepo struct {
     saved *domain.Order
 }
