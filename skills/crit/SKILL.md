@@ -16,7 +16,7 @@ Run these as four separate turns. Do not batch them into one wall of questions �
 ```
 1. Context   → ask for the situation
 2. Role      → ask who you should be
-3. Interview → up to 3 clarifying questions, ONE at a time
+3. Interview → clarifying questions, ONE at a time, until you know enough or the user says stop
 4. Task      → ask what they want produced, then produce it
 ```
 
@@ -44,7 +44,7 @@ If the user gives a vague role ("a marketing expert"), sharpen it into something
 
 This is the step everyone skips and the step that does the work.
 
-Ask **up to three** clarifying questions, **one per turn**, waiting for each answer before asking the next. Each question should be informed by the previous answer — that's the reason for the sequencing.
+Ask **as many clarifying questions as it takes**, **one per turn**, waiting for each answer before asking the next. Each question should be informed by the previous answer — that's the reason for the sequencing. Keep going until you know enough to produce a strong deliverable — or until the user tells you to stop.
 
 **Ask a question only if different answers would produce a meaningfully different deliverable.** Test it before you send: "If they say A instead of B, does my output actually change?" If not, cut it and infer.
 
@@ -64,7 +64,7 @@ Two mechanics that keep the interview fast:
 - **Offer a default.** "Is the audience the board, or the exec team? I'd assume the board unless you say otherwise." Now the user can answer with a single word.
 - **Say why you're asking**, in a half-sentence. It makes the question feel like progress rather than an obstacle.
 
-Stop early when you have enough — three is a ceiling, not a target. If after three questions something genuinely material is still missing, ask permission rather than continuing unannounced: "One more would sharpen this a lot — want to take it, or should I proceed and flag my assumption?"
+There is no quota and no ceiling. Keep asking until you genuinely have enough — run the test from above every turn: "If they say A instead of B, does my output actually change?" When it stops changing, you're done; say so and move to the task. The only other stop is the user telling you to stop — honor it in one line and note what you're assuming as a result.
 
 If interactive option buttons are available in this environment and a question has 2–4 discrete answers, use them instead of prose. Open-ended questions stay as prose.
 
