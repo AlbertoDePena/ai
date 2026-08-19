@@ -9,6 +9,8 @@ This skill encodes an opinionated architecture for Go services deployed as conta
 
 Full rationale, complete code samples, and the Dockerfile patterns live in `references/architecture.md`. Read it before generating any files — this SKILL.md is the quick-reference map, not the full spec.
 
+> **Related skill — `go-hexagonal`:** this template *is* a hexagonal layout, specialized with concrete tooling and a multi-binary/container deployment shape. Use **this** skill when the user is scaffolding or reviewing a deployable ECS/Fargate or Azure Container Apps service and wants those choices made for them. Fall back to `go-hexagonal` for the general dependency-direction principles when the deployment shape and specific tooling aren't the point.
+
 ## Core decisions (non-negotiable defaults for this template)
 
 - **One repo, one `go.mod`, separate binaries.** Every independently-scalable responsibility gets its own `cmd/<name>/` — `cmd/api`, `cmd/ui`, `cmd/worker`, `cmd/outbox-relay`, and any future one. Never add a run-mode flag to an existing binary to combine responsibilities; add a new `cmd/` entry instead. "Worker" is a category, not one binary — a queue consumer needing N replicas and an outbox relay needing exactly 1 replica are both workers but must be separate binaries.

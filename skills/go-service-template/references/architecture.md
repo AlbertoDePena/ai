@@ -2,6 +2,8 @@
 
 ## Goals
 
+> **Reading the code samples below:** they are illustrative and occasionally trim imports and struct fields for space, but they do **not** trim error handling — every generated `.go` file must check and handle every returned `error` (no `_ :=` on a call that can fail, no bare `json.Unmarshal(...)`). Treat the samples as the minimum bar, not a license to drop error checks.
+
 One repository that can produce any number of independently deployable services — an **API**, an **SSR UI**, and any number of **background binaries** (queue consumers, an outbox relay, cron-style jobs, batch imports, etc.) — sharing a single `internal/` library, built for containerized deployment to ECS/Fargate and Azure Container Apps. Each binary is its own container, its own deploy, its own failure domain, and — crucially for background work — its own scaling policy. "Worker" is not one binary; it's a category. A queue consumer that needs 10 replicas under load and an outbox relay that must run as exactly 1 replica are both "workers," but they scale, deploy, and fail independently, so they get separate `cmd/` entries rather than sharing one. Decisions below favor portability (env-var config, OTLP export, standard library first) and testability (interface-based mocking, no test framework dependency) over convenience shortcuts.
 
 ---
@@ -22,14 +24,14 @@ One repository that can produce any number of independently deployable services 
 │   │   └── tailwind/
 │   │       ├── input.css
 │   │       └── tailwind.config.js
-│   └── worker/
-│       ├── main.go
-│       ├── Dockerfile
-│       └── consumer/        # CreateUserParam, consumer funcs
+│   ├── worker/
+│   │   ├── main.go
+│   │   ├── Dockerfile
+│   │   └── consumer/        # CreateUserParam, consumer funcs
 │   └── outbox-relay/        # separate binary: polls outbox table, publishes to queue.Queue
 │       ├── main.go          # runs as a single replica (or with claim-locking) — different
 │       └── Dockerfile       # scaling profile than worker, so it's its own binary, not a
-│                             # second loop inside worker
+│                            # second loop inside worker
 ├── internal/
 │   ├── config/          # env var loading, per-binary config structs
 │   ├── log/             # slog setup + otel correlation handler
@@ -39,11 +41,11 @@ One repository that can produce any number of independently deployable services 
 │   ├── domain/          # core types and business logic (no framework deps)
 │   ├── service/         # business logic orchestration, shared across cmd/* binaries
 │   ├── repository/      # storage interfaces + mocks (no concrete impl), incl. Transactor
-│   ├── web/             # html/template rendering helpers
+│   ├── web/             # html/template RENDERING HELPERS (Go code) — not the templates themselves
 │   └── version/         # build-time version/commit injection
 ├── api/
 │   └── docs/            # swag-generated OpenAPI output
-├── web/
+├── web/                 # ASSET ROOT (distinct from internal/web above): the actual
 │   ├── templates/       # html/template files (layouts, partials, pages)
 │   └── static/          # compiled Tailwind CSS, JS, images
 ├── docs/
@@ -69,7 +71,7 @@ Kept flat and organic rather than pre-split into a rigid layering scheme. Add a 
 - **`domain`** — plain Go types, no `net/http`, no SQL, no queue types.
 - **`service`** — business logic and orchestration (e.g. "create user, then enqueue a welcome event"). Depends on `repository` and `queue` interfaces, exposes its own interface. This is the shared seam consumed by `cmd/api` HTTP handlers, `cmd/ui` template handlers, and any `cmd/<worker>` consumer or relay — see "Service layer" below.
 - **`repository`** — interfaces only (e.g. `UserRepository`, `OutboxRepository`, `Transactor`), plus generated/hand-written mocks. No `sqlc`, no driver import. See `docs/plugging-in-a-database.md`.
-- **`web`** — thin helpers around `html/template` (template set loading, layout composition, HTMX partial-response helpers).
+- **`web`** — thin helpers around `html/template` (template set loading, layout composition, HTMX partial-response helpers). This is Go code only; the template and static-asset *files* live under the repo-root `web/` directory (see the tree above) — don't conflate the two.
 - **`version`** — `var Version, Commit, BuildTime string` set via `-ldflags` at build time, exposed on a `/version` or `/healthz` style endpoint.
 
 ---
@@ -220,11 +222,24 @@ func fromDomain(u domain.User) UserResponse {
 
 func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
     var req CreateUserRequest
-    json.NewDecoder(r.Body).Decode(&req)
-    if err := h.svc.CreateUser(r.Context(), req.toDomain()); err != nil {
-        // ...
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "invalid request body", http.StatusBadRequest)
+        return
     }
-    json.NewEncoder(w).Encode(fromDomain(u))
+    if err := h.svc.CreateUser(r.Context(), req.toDomain()); err != nil {
+        http.Error(w, "could not create user", http.StatusInternalServerError)
+        return
+    }
+    w.WriteHeader(http.StatusCreated) // service.CreateUser returns only error; no body to echo
+}
+
+func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
+    u, err := h.svc.GetUser(r.Context(), chi.URLParam(r, "id"))
+    if err != nil {
+        http.Error(w, "not found", http.StatusNotFound)
+        return
+    }
+    _ = json.NewEncoder(w).Encode(fromDomain(u)) // UserResponse is the api edge type
 }
 ```
 
@@ -243,7 +258,11 @@ func toViewModel(u domain.User) UserViewModel {
 }
 
 func (h *UserHandler) ShowUser(w http.ResponseWriter, r *http.Request) {
-    u, _ := h.svc.GetUser(r.Context(), chi.URLParam(r, "id"))
+    u, err := h.svc.GetUser(r.Context(), chi.URLParam(r, "id"))
+    if err != nil {
+        http.Error(w, "not found", http.StatusNotFound)
+        return
+    }
     render(w, "user_profile.html", toViewModel(u))
 }
 ```
@@ -263,7 +282,9 @@ func (p CreateUserParam) toDomain() domain.User {
 
 func (c *UserConsumer) HandleMessage(ctx context.Context, msg queue.Message) error {
     var p CreateUserParam
-    json.Unmarshal(msg.Body, &p)
+    if err := json.Unmarshal(msg.Body, &p); err != nil {
+        return err // a malformed body will never parse — return so it dead-letters, don't retry forever
+    }
     return c.svc.CreateUser(ctx, p.toDomain())
 }
 ```
@@ -396,7 +417,10 @@ func (s *userService) CreateUser(ctx context.Context, u domain.User) error {
         if err := s.userRepo.Create(ctx, u); err != nil {
             return err
         }
-        payload, _ := json.Marshal(WelcomeEvent{UserID: u.ID})
+        payload, err := json.Marshal(WelcomeEvent{UserID: u.ID})
+        if err != nil {
+            return err
+        }
         return s.outboxRepo.Insert(ctx, domain.OutboxEvent{Type: "user.created", Payload: payload})
     })
 }
@@ -410,25 +434,52 @@ A separate process polls `OutboxRepository.FetchUnpublished`, calls `queue.Enque
 
 This is the same principle behind treating "worker" as a category rather than one binary: each independently-scalable background responsibility — a queue consumer, the outbox relay, a future cron job or batch importer — gets its own `cmd/<name>/` entry.
 
+Even though the relay is a bare loop rather than an HTTP server, it still needs the two conventions the rest of the template enforces: **graceful shutdown** (ECS/Fargate and Azure Container Apps send SIGTERM on every deploy — a naked `for { … time.Sleep }` gets hard-killed mid-publish) and **context-correlated logging** (the `*Context` `slog` variants, so relay logs join the trace like everything else).
+
 ```go
 // cmd/outbox-relay/main.go
 func main() {
-    cfg, _ := config.LoadOutboxRelay()
+    cfg, err := config.LoadOutboxRelay()
+    if err != nil {
+        log.Fatal(err)
+    }
     logger := log.New(slog.NewJSONHandler(os.Stdout, nil))
+    shutdownOTel := otel.Init(context.Background(), cfg.OTELEndpoint, "outbox-relay")
+    defer shutdownOTel(context.Background())
+
+    // SIGTERM/SIGINT cancels ctx, so an in-flight poll finishes and the loop
+    // exits cleanly on deploy instead of being killed mid-publish.
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
 
     outboxRepo := repository.NewOutboxRepository() // plugged in once a DB is chosen
     q := queue.New(cfg.QueueBackend)
 
+    ticker := time.NewTicker(cfg.PollInterval)
+    defer ticker.Stop()
     for {
-        events, _ := outboxRepo.FetchUnpublished(context.Background(), 100)
+        events, err := outboxRepo.FetchUnpublished(ctx, 100)
+        if err != nil {
+            logger.ErrorContext(ctx, "relay fetch failed", "err", err)
+        }
         for _, e := range events {
-            if err := q.Enqueue(context.Background(), e.Payload); err != nil {
-                logger.Error("relay publish failed", "event_id", e.ID, "err", err)
+            if err := q.Enqueue(ctx, e.Payload); err != nil {
+                logger.ErrorContext(ctx, "relay publish failed", "event_id", e.ID, "err", err)
                 continue
             }
-            outboxRepo.MarkPublished(context.Background(), e.ID)
+            if err := outboxRepo.MarkPublished(ctx, e.ID); err != nil {
+                // Enqueue already succeeded; a failed mark means this event
+                // republishes next poll — safe precisely because every
+                // consumer is idempotent (see delivery guarantee above).
+                logger.ErrorContext(ctx, "relay mark-published failed", "event_id", e.ID, "err", err)
+            }
         }
-        time.Sleep(cfg.PollInterval)
+        select {
+        case <-ctx.Done():
+            logger.InfoContext(ctx, "outbox relay shutting down")
+            return
+        case <-ticker.C:
+        }
     }
 }
 ```
@@ -489,7 +540,10 @@ func (s *userService) CreateUser(ctx context.Context, u domain.User) error {
         if err := s.repo.Create(ctx, u); err != nil {
             return err
         }
-        payload, _ := json.Marshal(WelcomeEvent{UserID: u.ID})
+        payload, err := json.Marshal(WelcomeEvent{UserID: u.ID})
+        if err != nil {
+            return err
+        }
         // business rule: new user triggers a welcome event — written atomically
         // with the user row via the outbox, then relayed to the real queue by
         // cmd/outbox-relay (see "Transactions and the outbox pattern" above)
@@ -610,9 +664,10 @@ func TestUserHandler_GetUser(t *testing.T) {
 ```dockerfile
 # --- tailwind stage ---
 FROM alpine:3.20 AS tailwind
+ARG TAILWIND_VERSION=v3.4.17   # pin explicitly — bump deliberately, never `latest` (breaks reproducible builds)
 RUN apk add --no-cache curl
 RUN curl -sLo /usr/local/bin/tailwindcss \
-      https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-x64 \
+      https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64 \
     && chmod +x /usr/local/bin/tailwindcss
 WORKDIR /app
 COPY cmd/ui/tailwind ./cmd/ui/tailwind
@@ -664,7 +719,7 @@ func main() {
 }
 ```
 
-`cmd/ui/main.go` and `cmd/worker/main.go` follow the same pattern — build `repo`, `outboxRepo`, and `tx`, call the same `service.NewUserService`, then hand the result to that binary's own entrypoint (template handler, or queue consumer respectively). `cmd/outbox-relay/main.go` is the exception — it wires `outboxRepo` and the concrete `queue.Queue` directly (see "Transactions and the outbox pattern" above), since relaying is its entire job rather than something reached through `service`. Everything explicit, top to bottom, grep-able. No `wire`, no reflection-based container.
+`cmd/ui/main.go` and `cmd/worker/main.go` follow the same pattern — build `repo`, `outboxRepo`, and `tx`, call the same `service.NewUserService`, then hand the result to that binary's own entrypoint (template handler, or queue consumer respectively). The HTTP binaries (`api`, `ui`) get graceful shutdown from `httpserver.RunWithGracefulShutdown`; the loop-based binaries (`worker`, `outbox-relay`) must build their own via `signal.NotifyContext` (see the relay above) — every binary honors SIGTERM so deploys don't kill in-flight work. `cmd/outbox-relay/main.go` is the exception — it wires `outboxRepo` and the concrete `queue.Queue` directly (see "Transactions and the outbox pattern" above), since relaying is its entire job rather than something reached through `service`. Everything explicit, top to bottom, grep-able. No `wire`, no reflection-based container.
 
 ---
 
@@ -679,4 +734,4 @@ func main() {
 - No linting config (`golangci-lint` config, `gofmt`/`goimports` enforcement) specified yet
 - No `Makefile` targets defined yet beyond implied `build`/`test`/`swag`/`tailwind`
 
-Flag these if you want them nailed down before I generate the actual file tree, or leave them as follow-ups after the first pass.
+When scaffolding a repo, confirm with the user whether these should be generated in the first pass or deferred as follow-ups — don't invent a CI provider, linter config, or Makefile targets without asking, since each was left open deliberately.
