@@ -1,15 +1,13 @@
 ---
 name: go-service-template
-description: Use this skill whenever the user is building, scaffolding, structuring, or reviewing a Go service that will run as a container on ECS/Fargate or Azure Container Apps — whether it's an API (Swagger), an SSR UI (HTMX + Go templates + Tailwind), a background worker, a queue consumer, or an outbox relay. Also use when the user asks about Go repo layout, how to organize internal/ packages, how to add a service/repository layer with interface-based mocking, how to wire a transactional outbox pattern, how to structure multi-binary Go repos (cmd/api, cmd/ui, cmd/worker), or how to keep API/UI/worker entrypoints decoupled from shared business logic. Trigger even if the user doesn't say "template" explicitly — e.g. "how should I structure this Go service," "add a worker to this repo," "I need a transaction across two repos," or "should this be its own binary" are all in scope.
+description: Use this skill whenever the user is building, scaffolding, structuring, or reviewing a Go service that will run as a container — whether it's an API (Swagger), an SSR UI (HTMX + Go templates + Tailwind), a background worker, a queue consumer, or an outbox relay. Also use when the user asks about Go repo layout, how to organize internal/ packages, how to add a service/repository layer with interface-based mocking, how to wire a transactional outbox pattern, how to structure multi-binary Go repos (cmd/api, cmd/ui, cmd/worker), or how to keep API/UI/worker entrypoints decoupled from shared business logic. Trigger even if the user doesn't say "template" explicitly — e.g. "how should I structure this Go service," "add a worker to this repo," "I need a transaction across two repos," or "should this be its own binary" are all in scope.
 ---
 
 # Go Multi-Binary Service Template
 
-This skill encodes an opinionated architecture for Go services deployed as containers to ECS/Fargate and Azure Container Apps. It covers three kinds of entrypoints — **API** (Swagger-documented), **SSR UI** (HTMX + Go templates + Tailwind), and any number of **background binaries** (queue consumers, outbox relays, cron jobs) — sharing one `internal/` library in one repo.
+This skill encodes an opinionated architecture for Go services deployed as containers. It covers three kinds of entrypoints — **API** (Swagger-documented), **SSR UI** (HTMX + Go templates + Tailwind), and any number of **background binaries** (queue consumers, outbox relays, cron jobs) — sharing one `internal/` library in one repo.
 
 Full rationale, complete code samples, and the Dockerfile patterns live in `references/architecture.md`. Read it before generating any files — this SKILL.md is the quick-reference map, not the full spec.
-
-> **Related skill — `go-hexagonal`:** this template *is* a hexagonal layout, specialized with concrete tooling and a multi-binary/container deployment shape. Use **this** skill when the user is scaffolding or reviewing a deployable ECS/Fargate or Azure Container Apps service and wants those choices made for them. Fall back to `go-hexagonal` for the general dependency-direction principles when the deployment shape and specific tooling aren't the point.
 
 ## Core decisions (non-negotiable defaults for this template)
 
