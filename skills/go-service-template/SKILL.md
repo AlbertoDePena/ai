@@ -14,7 +14,7 @@ Full rationale, complete code samples, and the Dockerfile patterns live in `refe
 ## Core decisions (non-negotiable defaults for this template)
 
 - **One repo, one `go.mod`, separate binaries.** Every independently-scalable responsibility gets its own `cmd/<name>/` — `cmd/api`, `cmd/ui`, `cmd/worker`, `cmd/outbox-relay`, and any future one. Never add a run-mode flag to an existing binary to combine responsibilities; add a new `cmd/` entry instead. "Worker" is a category, not one binary — a queue consumer needing N replicas and an outbox relay needing exactly 1 replica are both workers but must be separate binaries.
-- **Single `internal/` tree**, organic subpackages (`config`, `log`, `otel`, `httpserver`, `queue`, `domain`, `service`, `repository`, `web`, `version`). Don't pre-split further than the concern warrants.
+- **Single `internal/` tree**, organic subpackages (`config`, `log`, `otel`, `httpserver`, `queue`, `domain`, `service`, `repository`, `render`, `version`). Don't pre-split further than the concern warrants.
 - **Layering, strictly one direction:** entrypoint edge type → `service` interface → `repository`/`queue`/`Transactor` interfaces → (real DB/queue, plugged in later). Handlers and consumers never call `repository` or `queue` directly — always through `service`.
 - **Entry-point-owned edge types.** Each binary defines its own request/response shape, colocated with its handlers so nothing else imports them:
   - `cmd/api/handler` → `Request`/`Response` structs, JSON-tagged
@@ -43,7 +43,7 @@ cmd/
   worker/{main.go, Dockerfile, consumer/}
   outbox-relay/{main.go, Dockerfile}
 internal/
-  config/ log/ otel/ httpserver/ queue/ domain/ service/ repository/ web/ version/
+  config/ log/ otel/ httpserver/ queue/ domain/ service/ repository/ render/ version/
 api/docs/           # swag output
 web/templates/ web/static/
 docs/plugging-in-a-database.md

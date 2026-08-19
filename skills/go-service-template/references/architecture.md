@@ -41,11 +41,11 @@ One repository that can produce any number of independently deployable services 
 │   ├── domain/          # core types and business logic (no framework deps)
 │   ├── service/         # business logic orchestration, shared across cmd/* binaries
 │   ├── repository/      # storage interfaces + mocks (no concrete impl), incl. Transactor
-│   ├── web/             # html/template RENDERING HELPERS (Go code) — not the templates themselves
+│   ├── render/          # html/template RENDERING HELPERS (Go code) — not the templates themselves
 │   └── version/         # build-time version/commit injection
 ├── api/
 │   └── docs/            # swag-generated OpenAPI output
-├── web/                 # ASSET ROOT (distinct from internal/web above): the actual
+├── web/                 # ASSET ROOT: the actual template/static files (rendered by internal/render)
 │   ├── templates/       # html/template files (layouts, partials, pages)
 │   └── static/          # compiled Tailwind CSS, JS, images
 ├── docs/
@@ -71,7 +71,7 @@ Kept flat and organic rather than pre-split into a rigid layering scheme. Add a 
 - **`domain`** — plain Go types, no `net/http`, no SQL, no queue types.
 - **`service`** — business logic and orchestration (e.g. "create user, then enqueue a welcome event"). Depends on `repository` and `queue` interfaces, exposes its own interface. This is the shared seam consumed by `cmd/api` HTTP handlers, `cmd/ui` template handlers, and any `cmd/<worker>` consumer or relay — see "Service layer" below.
 - **`repository`** — interfaces only (e.g. `UserRepository`, `OutboxRepository`, `Transactor`), plus generated/hand-written mocks. No `sqlc`, no driver import. See `docs/plugging-in-a-database.md`.
-- **`web`** — thin helpers around `html/template` (template set loading, layout composition, HTMX partial-response helpers). This is Go code only; the template and static-asset *files* live under the repo-root `web/` directory (see the tree above) — don't conflate the two.
+- **`render`** — thin helpers around `html/template` (template set loading, layout composition, HTMX partial-response helpers). Named for the behavior (rendering), deliberately *not* `web`, so it never collides with the repo-root `web/` asset directory. This is Go code only; the template and static-asset *files* it renders live under repo-root `web/` (see the tree above).
 - **`version`** — `var Version, Commit, BuildTime string` set via `-ldflags` at build time, exposed on a `/version` or `/healthz` style endpoint.
 
 ---
