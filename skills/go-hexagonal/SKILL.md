@@ -17,6 +17,8 @@ description: >
 This skill enforces a **strict** hexagonal (ports & adapters) layout for Go applications.
 The core rule: **domain logic never depends on infrastructure**. Dependencies always point inward.
 
+> **Related skill — `go-service-template`:** that skill is the opinionated, batteries-included variant for a *containerized multi-binary service* (cmd/api + cmd/ui + cmd/worker, outbox relay, chi, slog/OTel, Docker). Prefer it when the user is scaffolding a deployable ECS/Fargate or Azure Container Apps service and wants concrete tooling choices made for them. Use **this** skill for the general architecture principles — enforcing dependency direction in any Go codebase, reviewing an existing layout, or when the deployment shape and tooling are not the point.
+
 Read `references/structure.md` for the canonical folder layout and file naming rules.
 Read `references/patterns.md` for port/adapter code patterns, anti-patterns, and refactoring recipes.
 
