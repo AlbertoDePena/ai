@@ -1,5 +1,5 @@
 ---
-name: golang-service-template
+name: go-service-template
 description: Use this skill whenever the user is building, scaffolding, structuring, or reviewing a Go service that will run as a container on ECS/Fargate or Azure Container Apps — whether it's an API (Swagger), an SSR UI (HTMX + Go templates + Tailwind), a background worker, a queue consumer, or an outbox relay. Also use when the user asks about Go repo layout, how to organize internal/ packages, how to add a service/repository layer with interface-based mocking, how to wire a transactional outbox pattern, how to structure multi-binary Go repos (cmd/api, cmd/ui, cmd/worker), or how to keep API/UI/worker entrypoints decoupled from shared business logic. Trigger even if the user doesn't say "template" explicitly — e.g. "how should I structure this Go service," "add a worker to this repo," "I need a transaction across two repos," or "should this be its own binary" are all in scope.
 ---
 
