@@ -34,7 +34,7 @@ One repository that can produce any number of independently deployable services 
 │                            # second loop inside worker
 ├── internal/
 │   ├── config/          # env var loading, per-binary config structs
-│   ├── log/             # slog setup + otel correlation handler
+│   ├── log/             # slog setup: stdout JSON + otelslog bridge (fan-out)
 │   ├── otel/             # tracer/meter provider setup, OTLP exporters
 │   ├── httpserver/      # chi router, middleware, graceful shutdown
 │   ├── queue/           # generic queue interface + sqs/servicebus impls
@@ -63,9 +63,9 @@ One `go.mod` for the whole repo. Every `cmd/*` binary imports from `internal/` d
 
 Kept flat and organic rather than pre-split into a rigid layering scheme. Add a subpackage when a concern earns one; don't create empty ones speculatively.
 
-- **`config`** — one `Load[T]()`-style function per binary reading env vars into a typed struct, with `required`/`default` tags or explicit validation. No file-based config, no cloud SDK calls.
-- **`log`** — wraps `slog` with a custom `Handler` that reads `trace_id`/`span_id` off the `context.Context` (via OTel's span context) and attaches them as structured fields, so every log line correlates to a trace.
-- **`otel`** — sets up `TracerProvider` and `MeterProvider` with an OTLP exporter (gRPC or HTTP, config-driven endpoint), shared init code called from all three `main.go` files.
+- **`config`** — one `Load*()` function per binary reading env vars into a typed struct via small hand-rolled `os.Getenv` helpers (`getEnv` with a default, `mustEnv` for required). No struct tags, no reflection, no third-party env library. No file-based config, no cloud SDK calls.
+- **`log`** — thin setup around `slog` bridged to OpenTelemetry via `otelslog` (`go.opentelemetry.io/contrib/bridges/otelslog`). The bridge emits each `slog` record as an OTel log record through the shared `LoggerProvider`, so `trace_id`/`span_id` are attached automatically from the active span — no custom `slog.Handler`. Logs then ride the same OTLP pipeline as traces and metrics.
+- **`otel`** — sets up `TracerProvider`, `MeterProvider`, **and `LoggerProvider`**, each with an OTLP exporter (gRPC or HTTP, config-driven endpoint) and a single combined `shutdown(ctx)`; shared init code called from all `main.go` files. The `LoggerProvider` (registered globally) is what backs the `otelslog` bridge in `internal/log`.
 - **`httpserver`** — chi router construction, common middleware (request ID, recover, timeout, the log-correlation middleware), and a graceful-shutdown helper (`http.Server` + signal handling) used by both `api` and `ui`.
 - **`queue`** — the generic interface described below, plus `sqs` and `servicebus` implementations selected by config.
 - **`domain`** — plain Go types, no `net/http`, no SQL, no queue types.
@@ -78,27 +78,66 @@ Kept flat and organic rather than pre-split into a rigid layering scheme. Add a 
 
 ## Config: env vars only
 
+Hand-rolled with the standard library only — two small helpers cover every binary's needs, no reflection and no struct tags to learn.
+
+```go
+// internal/config/env.go
+package config
+
+import "os"
+
+// getEnv returns the value of key, or def when the var is unset or empty.
+func getEnv(key, def string) string {
+    if v := os.Getenv(key); v != "" {
+        return v
+    }
+    return def
+}
+
+// mustEnv returns the value of key, or appends key to missing when unset.
+// Collecting into a slice lets Load* report every missing var at once
+// instead of failing on the first one.
+func mustEnv(key string, missing *[]string) string {
+    v := os.Getenv(key)
+    if v == "" {
+        *missing = append(*missing, key)
+    }
+    return v
+}
+```
+
 ```go
 // internal/config/api.go
 package config
 
-import "github.com/caarlos0/env/v9" // or hand-rolled os.Getenv — pick one and stay consistent
+import (
+    "fmt"
+    "strings"
+)
 
 type API struct {
-    Port           string `env:"PORT" envDefault:"8080"`
-    LogLevel       string `env:"LOG_LEVEL" envDefault:"info"`
-    OTELEndpoint   string `env:"OTEL_EXPORTER_OTLP_ENDPOINT,required"`
-    QueueBackend   string `env:"QUEUE_BACKEND" envDefault:"sqs"` // sqs | servicebus
+    Port         string // PORT, default 8080
+    LogLevel     string // LOG_LEVEL, default info
+    OTELEndpoint string // OTEL_EXPORTER_OTLP_ENDPOINT, required
+    QueueBackend string // QUEUE_BACKEND, default sqs (sqs | servicebus)
 }
 
 func LoadAPI() (API, error) {
-    var c API
-    if err := env.Parse(&c); err != nil {
-        return API{}, err
+    var missing []string
+    c := API{
+        Port:         getEnv("PORT", "8080"),
+        LogLevel:     getEnv("LOG_LEVEL", "info"),
+        OTELEndpoint: mustEnv("OTEL_EXPORTER_OTLP_ENDPOINT", &missing),
+        QueueBackend: getEnv("QUEUE_BACKEND", "sqs"),
+    }
+    if len(missing) > 0 {
+        return API{}, fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))
     }
     return c, nil
 }
 ```
+
+For non-string values (ints, bools, durations) add a matching helper next to `getEnv` — e.g. `getEnvInt(key string, def int) (int, error)` wrapping `strconv.Atoi` — rather than reaching for a library. Keep the helper set minimal and grow it only when a binary actually needs the type.
 
 No SSM/Key Vault calls in app code. Each platform's deploy tooling (ECS task definition, Azure Container App secrets) is responsible for injecting the actual values as env vars. If a future project needs a secrets backend, that's a config-loading swap, not an architecture change.
 
@@ -106,41 +145,107 @@ No SSM/Key Vault calls in app code. Each platform's deploy tooling (ECS task def
 
 ## Logging + OpenTelemetry correlation
 
-The core trick is a custom `slog.Handler` that enriches every record with trace context:
+Logging goes through the official slog→OTel bridge, `otelslog`, rather than a hand-rolled `slog.Handler`. The bridge emits each `slog` record as an OpenTelemetry log record via a shared `LoggerProvider`; because the OTel log SDK associates every record with the span in the `context.Context`, `trace_id`/`span_id` correlation is automatic and logs travel the same OTLP pipeline as traces and metrics — one collector, one wire format, correlated in the backend. It also sidesteps the classic custom-handler footgun where `WithAttrs`/`WithGroup` silently drop enrichment.
 
 ```go
-// internal/log/otel_handler.go
-package log
+// internal/otel/logs.go (traces/metrics set up alongside, sharing one resource + shutdown)
+package otel
 
 import (
     "context"
-    "log/slog"
 
-    "go.opentelemetry.io/otel/trace"
+    "go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
+    "go.opentelemetry.io/otel/log/global"
+    sdklog "go.opentelemetry.io/otel/sdk/log"
+    "go.opentelemetry.io/otel/sdk/resource"
 )
 
-type otelHandler struct {
-    slog.Handler
-}
-
-func (h *otelHandler) Handle(ctx context.Context, r slog.Record) error {
-    if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-        r.AddAttrs(
-            slog.String("trace_id", span.SpanContext().TraceID().String()),
-            slog.String("span_id", span.SpanContext().SpanID().String()),
-        )
+func newLoggerProvider(ctx context.Context, res *resource.Resource) (*sdklog.LoggerProvider, error) {
+    exp, err := otlploghttp.New(ctx) // endpoint from OTEL_EXPORTER_OTLP_ENDPOINT
+    if err != nil {
+        return nil, err
     }
-    return h.Handler.Handle(ctx, r)
-}
-
-func New(base slog.Handler) *slog.Logger {
-    return slog.New(&otelHandler{Handler: base})
+    lp := sdklog.NewLoggerProvider(
+        sdklog.WithResource(res),
+        sdklog.WithProcessor(sdklog.NewBatchProcessor(exp)),
+    )
+    global.SetLoggerProvider(lp) // otelslog reads the global provider by default
+    return lp, nil               // include lp.Shutdown in the combined shutdown(ctx)
 }
 ```
 
-Every handler and worker function must take `context.Context` and use `slog.InfoContext(ctx, ...)` (not the context-less variants) or the correlation never fires. This is the one convention that has to be enforced everywhere — worth a lint rule or code review checklist item.
+```go
+// internal/log/log.go
+package log
 
-Traces and metrics both export via OTLP to a collector endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT`), set up once in `internal/otel` and called from each `main.go`. Locally, `docker-compose.yml` runs an `otel/opentelemetry-collector` container so `make dev` gives you working correlation without touching a real cloud backend.
+import (
+    "log/slog"
+    "os"
+
+    "go.opentelemetry.io/contrib/bridges/otelslog"
+)
+
+// New fans each record out to two sinks: a stdout JSON handler (so the
+// platform's native log view — CloudWatch, Log Analytics — still shows
+// lines) and the otelslog bridge, which emits through the global OTel
+// LoggerProvider (set up in internal/otel) with trace context attached.
+// Call this AFTER otel.Init, or the bridge binds to a no-op provider.
+// (multiHandler is the small fan-out helper defined under "Stdout
+// tradeoff" below — this two-sink setup is the template's default.)
+func New(service string) *slog.Logger {
+    return slog.New(multiHandler{
+        slog.NewJSONHandler(os.Stdout, nil),
+        otelslog.NewHandler(service),
+    })
+}
+```
+
+Every handler and worker function must still take `context.Context` and use the `*Context` slog variants (`slog.InfoContext(ctx, ...)`) — the bridge reads the span off that context, so a context-less log call loses correlation. This remains the one convention to enforce everywhere.
+
+Traces, metrics, and now logs all export via OTLP to the collector endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT`), wired once in `internal/otel` and started from each `main.go` with a single deferred `shutdown(ctx)` for a clean flush. Locally, `docker-compose.yml` runs an `otel/opentelemetry-collector` container so `make dev` gives working correlation across all three signals without a real cloud backend.
+
+**Stdout tradeoff (matters for ECS/Fargate + Azure Container Apps).** On its own, `otelslog` sends logs to the collector, *not* to the process's stdout — so platform-native log views that tail container stdout (CloudWatch, Log Analytics) would be empty. That's exactly why `log.New` above fans out to a stdout `slog.JSONHandler` *and* the bridge: stdout capture is the default log path on these platforms, so the template pays for both by default. (The alternative — collector-only, with a `debug` exporter for local visibility — is fine if your platform doesn't rely on stdout; drop the JSON handler from `log.New` if so.) The fan-out helper:
+
+```go
+// internal/log/multi.go — fans one record out to N handlers; re-wraps on
+// WithAttrs/WithGroup so enrichment survives slog.With(...) chaining.
+type multiHandler []slog.Handler
+
+func (m multiHandler) Enabled(ctx context.Context, l slog.Level) bool {
+    for _, h := range m {
+        if h.Enabled(ctx, l) {
+            return true
+        }
+    }
+    return false
+}
+func (m multiHandler) Handle(ctx context.Context, r slog.Record) error {
+    for _, h := range m {
+        if h.Enabled(ctx, r.Level) {
+            if err := h.Handle(ctx, r.Clone()); err != nil {
+                return err
+            }
+        }
+    }
+    return nil
+}
+func (m multiHandler) WithAttrs(a []slog.Attr) slog.Handler {
+    out := make(multiHandler, len(m))
+    for i, h := range m {
+        out[i] = h.WithAttrs(a)
+    }
+    return out
+}
+func (m multiHandler) WithGroup(name string) slog.Handler {
+    out := make(multiHandler, len(m))
+    for i, h := range m {
+        out[i] = h.WithGroup(name)
+    }
+    return out
+}
+```
+
+One caveat with fan-out: the stdout `JSONHandler` copy won't carry `trace_id`/`span_id` — correlation is added by the OTel log SDK, which only sees the bridged copy. If you need trace IDs in the stdout copy too, wrap that `JSONHandler` in a tiny enrichment handler that pulls the span context off `ctx` (implementing `WithAttrs`/`WithGroup` to re-wrap, as above), and leave the bridge untouched.
 
 ---
 
@@ -404,6 +509,10 @@ type PostgresTransactor struct {
     // db *sql.DB
 }
 
+func NewTransactor() *PostgresTransactor {
+    return &PostgresTransactor{}
+}
+
 func (t *PostgresTransactor) WithinTx(ctx context.Context, fn func(ctx context.Context) error) error {
     // ...
 }
@@ -533,11 +642,12 @@ type outboxReader interface {
 func main() {
     cfg, err := config.LoadOutboxRelay()
     if err != nil {
-        log.Fatal(err)
+        fmt.Fprintf(os.Stderr, "config: %v\n", err) // no logger yet; internal/log owns the name "log"
+        os.Exit(1)
     }
-    logger := log.New(slog.NewJSONHandler(os.Stdout, nil))
     shutdownOTel := otel.Init(context.Background(), cfg.OTELEndpoint, "outbox-relay")
     defer shutdownOTel(context.Background())
+    logger := log.New("outbox-relay") // after otel.Init: the bridge binds to the now-registered provider
 
     // SIGTERM/SIGINT cancels ctx, so an in-flight poll finishes and the loop
     // exits cleanly on deploy instead of being killed mid-publish.
@@ -877,12 +987,13 @@ ENTRYPOINT ["/ui"]
 func main() {
     cfg, err := config.LoadAPI()
     if err != nil {
-        log.Fatal(err)
+        fmt.Fprintf(os.Stderr, "config: %v\n", err) // no logger yet; internal/log owns the name "log"
+        os.Exit(1)
     }
 
-    logger := log.New(slog.NewJSONHandler(os.Stdout, nil))
     shutdownOTel := otel.Init(context.Background(), cfg.OTELEndpoint, "api")
     defer shutdownOTel(context.Background())
+    logger := log.New("api") // after otel.Init: the bridge binds to the now-registered provider
 
     userRepo := repository.NewUserRepository()             // *PostgresUserRepository — wherever the real impl lives once plugged in
     outboxRepo := repository.NewOutboxRepository()          // *PostgresOutboxRepository
@@ -893,11 +1004,12 @@ func main() {
     userSvc := service.NewUserService(userRepo, outboxRepo, tx) // same constructor used by cmd/ui and cmd/worker
     billing := billingclient.New(cfg.BillingAPIKey)             // only cmd/api's registration flow needs this
     registerSvc := service.NewRegisterUserService(userSvc, billing)
-    userHandler := handler.NewUserHandler(userSvc, logger)
-    registerHandler := handler.NewRegisterHandler(registerSvc, logger)
+    userHandler := handler.NewUserHandler(userSvc)              // logger comes from request context (LoggingMiddleware), not the constructor
+    registerHandler := handler.NewRegisterHandler(registerSvc)
 
     r := httpserver.NewRouter(httpserver.LoggingMiddleware(logger))
     r.Get("/users/{id}", userHandler.GetUser)
+    r.Post("/register", registerHandler.Register)
 
     httpserver.RunWithGracefulShutdown(r, cfg.Port, logger)
 }

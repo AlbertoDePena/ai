@@ -46,7 +46,7 @@ Full rationale, complete code samples, and the Dockerfile patterns live in `refe
 - **Env vars only for config** — no SSM/Key Vault calls in app code; the deploy platform injects values.
 - **`net/http` + `chi` + `html/template`** for HTTP/UI — no alternate router or `templ`.
 - **`swaggo/swag`** generates OpenAPI from handler comments — not spec-first.
-- **`slog` + OpenTelemetry, correlated.** A custom `slog.Handler` pulls `trace_id`/`span_id` from the span context on every log call — every handler/consumer must use the `*Context` `slog` variants (`InfoContext`, etc.) or correlation silently breaks. Traces/metrics export via **OTLP to a generic collector**, never a cloud-specific exporter baked into app code.
+- **`slog` + OpenTelemetry, correlated.** Logging is bridged to OTel with `otelslog` (`go.opentelemetry.io/contrib/bridges/otelslog`) — no hand-rolled `slog.Handler`; the bridge attaches `trace_id`/`span_id` from the span context automatically and emits logs as a first-class OTLP signal. Every handler/consumer must still use the `*Context` `slog` variants (`InfoContext`, etc.) or correlation silently breaks. Traces, metrics, **and logs** export via **OTLP to a generic collector**, never a cloud-specific exporter baked into app code. On stdout-capturing platforms (ECS/Fargate, Azure Container Apps), fan out to a stdout `slog.JSONHandler` alongside the bridge.
 - **Tailwind via the standalone CLI**, no Node/npm anywhere in the build.
 
 ## Repo layout (quick reference)
