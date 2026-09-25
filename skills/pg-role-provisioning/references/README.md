@@ -62,6 +62,20 @@ Key properties of the model:
 - **No `CREATE` on the application schema.** None of the four roles can
   create tables, views, functions, or schemas. DDL is done through the
   master account; the roles only get DML / `USAGE` / `EXECUTE`.
+- **PUBLIC gets no `EXECUTE` in the application schema.** Postgres grants
+  `EXECUTE` on every new function to `PUBLIC`, which would make the
+  read-only tiers read-only in name only: a `SECURITY DEFINER` function
+  runs with the *definer's* rights (the master account), so a `PUBLIC`
+  grant on one lets any role that can connect perform writes it is
+  otherwise denied. That implicit grant is revoked, and only the two
+  read/write tiers get `EXECUTE` by default.
+
+  Consequences worth knowing: the read-only tiers cannot call functions
+  at all unless granted per-function, and because `ALTER DEFAULT
+  PRIVILEGES` cannot tell `SECURITY DEFINER` from invoker-rights
+  functions, a `SECURITY DEFINER` function added to the schema *is*
+  handed to the two read/write tiers automatically — set its grants
+  explicitly when you add one.
 - **`public` and `PUBLIC` are locked down.** Postgres' implicit `PUBLIC`
   grants (`CONNECT` on the db, `USAGE`/`CREATE` on `public`) are revoked,
   and no permission role is granted on `public`, so access must come
@@ -182,9 +196,13 @@ The role + grant logic for **one** database, scoped to whatever database
    database and `public`, and strips any permission-role grants a
    previous version of this script may have placed on `public`.
    **Always applied.**
-3. Grants each role `CONNECT` on this database. **Always applied** —
-   this is what lets the roles reach the database at all now that
-   `PUBLIC`'s implicit `CONNECT` was revoked in step 2.
+3. Grants `CONNECT` on this database — always applied, since step 2
+   revoked `PUBLIC`'s implicit `CONNECT` and without this nothing but
+   the master account could reach the database. *Which* roles get it
+   depends on `create_app_schema`: all four tiers when `true`, and only
+   `<namespace>_application` when `false` (a DBOS system db), where the
+   other three are explicitly revoked so a re-run tightens a database
+   provisioned by an earlier version.
 4. **Only when `create_app_schema` is true (the default):** creates the
    application schema (`schema_name`), sets the database's
    `search_path` to `<schema_name>, public`, and grants each role the
@@ -381,6 +399,19 @@ migrate the role can only connect because Postgres' default `PUBLIC`
 the system db's `public` schema. `setup-database-roles.pgsql.sql` is
 what closes that: it revokes the default `PUBLIC` grants, locks down
 `public`, and gives the app role an explicit `CONNECT`.
+
+Only the **application** role gets that `CONNECT`. The other three tiers
+are revoked on a system db: `dbos migrate --app-role` grants the `dbos`
+schema to one role, so `CONNECT` for the rest bought nothing but a
+session in which every query failed. Widening it is a real data-access
+decision rather than a debugging convenience — `dbos.workflow_status`
+holds serialized workflow `inputs`, `output` and `request` plus the
+authenticated user and roles, so `SELECT` there exposes application
+payloads and caller identity. Expose a column-projecting **view**
+instead, and note that `dbosctl`'s `--app-role` cannot help: it emits
+`GRANT ALL PRIVILEGES` (see `--print-user-role`) and has no read-only
+mode, so aiming it at a `_readonly` tier would quietly make that tier
+read/write.
 
 So `create-application-databases.sh` still runs
 `setup-database-roles.pgsql.sql` against the system db — but with

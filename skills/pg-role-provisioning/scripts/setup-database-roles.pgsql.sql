@@ -188,10 +188,32 @@ BEGIN
     END LOOP;
 END $$;
 
--- ---------- explicit CONNECT for each role ----------
--- Always granted, regardless of create_app_schema: this is what lets
--- each role reach this database at all now that PUBLIC's implicit
--- CONNECT was revoked above.
+-- ---------- explicit CONNECT ----------
+-- Some CONNECT grant is always needed here: PUBLIC's implicit CONNECT
+-- was revoked above, so without this nothing but the master account
+-- could reach the database at all.
+--
+-- WHICH roles get it depends on create_app_schema:
+--
+--   * true (an application db) -- all four tiers. Application and
+--     developer logins alike do their work in the application schema.
+--
+--   * false (a DBOS system db) -- only <prefix>_application. DBOS keeps
+--     its tables in the `dbos` schema, and `dbosctl sysdb migrate
+--     --app-role` grants them to exactly one role, so CONNECT for the
+--     other three tiers only buys a session in which every query fails.
+--     Widening this is a deliberate data-access decision, not a
+--     debugging convenience: dbos.workflow_status stores serialized
+--     workflow `inputs`/`output`/`request` plus the authenticated user
+--     and roles, so SELECT there exposes application payloads and
+--     caller identity. Expose a column-projecting VIEW instead.
+--
+-- The false branch also REVOKEs the other three tiers, so re-running
+-- this script against a system db provisioned by an earlier version
+-- (which granted all four) tightens it rather than leaving the extra
+-- grants in place.
+\if :create_app_schema
+
 DO $$
 DECLARE
     v_role_prefix text;
@@ -209,6 +231,29 @@ BEGIN
         EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), v_role);
     END LOOP;
 END $$;
+
+\else
+
+DO $$
+DECLARE
+    v_role_prefix text;
+    v_roles       text[];
+    v_role        text;
+BEGIN
+    SELECT role_prefix INTO v_role_prefix FROM _setup_params;
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I',
+                   current_database(), v_role_prefix || '_application');
+    v_roles := ARRAY[
+        v_role_prefix || '_application_readonly',
+        v_role_prefix || '_developer',
+        v_role_prefix || '_developer_readonly'
+    ];
+    FOREACH v_role IN ARRAY v_roles LOOP
+        EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', current_database(), v_role);
+    END LOOP;
+END $$;
+
+\endif
 
 \if :create_app_schema
 
@@ -229,6 +274,60 @@ BEGIN
     -- it grants no access on its own since public is locked down
     -- above.
     EXECUTE format('ALTER DATABASE %I SET search_path TO %I, public', current_database(), v_schema);
+END $$;
+
+-- ---------- strip PUBLIC's implicit EXECUTE in the application schema ----------
+-- Postgres grants EXECUTE on every new function to PUBLIC. The public
+-- schema is scrubbed of PUBLIC grants above, but the application schema
+-- needs the same treatment, and for a sharper reason: a SECURITY
+-- DEFINER function here runs with the *definer's* rights (the master
+-- account), so a PUBLIC EXECUTE grant on one lets any role that can
+-- connect -- the read-only tiers included -- perform writes it is
+-- otherwise denied. That silently voids the read-only guarantee.
+--
+-- Invoker-rights functions are unaffected in practice (they already run
+-- under the caller's table privileges), so revoking PUBLIC costs the
+-- read-only tiers nothing they were entitled to.
+--
+-- The two read/write tiers still get EXECUTE by default further down.
+-- That is deliberate but worth knowing: ALTER DEFAULT PRIVILEGES cannot
+-- distinguish SECURITY DEFINER from invoker-rights functions, so a
+-- SECURITY DEFINER function added to this schema is handed to those two
+-- tiers automatically. Set its grants explicitly when you add one.
+--
+-- TWO SUBTLETIES, both load-bearing -- do not "tidy" either away:
+--
+-- 1. The default-privileges revoke below is deliberately GLOBAL (no
+--    IN SCHEMA clause). The schema-scoped spelling,
+--
+--       ALTER DEFAULT PRIVILEGES IN SCHEMA x REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+--
+--    reports "ALTER DEFAULT PRIVILEGES" and does NOTHING: a
+--    schema-scoped entry is MERGED WITH the built-in default rather
+--    than replacing it, and an ACL cannot record a negative, so PUBLIC's
+--    implicit EXECUTE survives and every new function still comes out
+--    with `=X`. Only the global form writes the pg_default_acl row
+--    (defaclnamespace = 0) that actually suppresses it. That row is
+--    per-database, so applying it here -- once per database this script
+--    runs against -- is correctly scoped.
+--
+-- 2. It is scoped to the role that RUNS it (defaclrole), i.e. the master
+--    account. That matches this model, where all DDL goes through that
+--    account. If a second admin ever creates functions in this schema,
+--    PUBLIC gets EXECUTE on them again and this needs re-running as
+--    that role.
+--
+-- The REVOKE ... ON ALL FUNCTIONS statement handles functions that
+-- already exist (default privileges only ever affect future objects),
+-- which is what keeps re-runs effective on an established database.
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
+DO $$
+DECLARE
+    v_schema text;
+BEGIN
+    SELECT schema_name INTO v_schema FROM _setup_params;
+    EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA %I FROM PUBLIC', v_schema);
 END $$;
 
 -- ---------- <role_prefix>_application — read/write, for application logins ----------
