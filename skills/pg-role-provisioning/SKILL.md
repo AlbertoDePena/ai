@@ -133,13 +133,33 @@ db, via `\set create_app_schema ...` before each `\i` call — the same
 `schema_name` value is passed once, up front, for both databases; the
 flag just controls whether that run actually creates the schema.
 
-When `false`, role creation, the `public`/`PUBLIC` lockdown, and each
-role's `CONNECT` grant still happen (that's the actual reason to run
-this script against the DBOS system db at all — `dbosctl sysdb
-migrate` never does that hardening); only the application-schema
-creation and its schema-level grants are skipped. This avoids leaving a
-pointless, empty app schema sitting in the DBOS system database, since
-DBOS puts its real tables in its own `dbos` schema instead.
+When `false`, role creation and the `public`/`PUBLIC` lockdown still
+happen (that's the actual reason to run this script against the DBOS
+system db at all — `dbosctl sysdb migrate` never does that hardening);
+the application-schema creation and its schema-level grants are skipped.
+This avoids leaving a pointless, empty app schema sitting in the DBOS
+system database, since DBOS puts its real tables in its own `dbos`
+schema instead.
+
+The flag also decides **which roles get `CONNECT`**:
+
+- `true` (app db) — all four tiers.
+- `false` (DBOS system db) — only `<namespace>_application`, and the
+  other three are explicitly *revoked* so re-running tightens a system
+  db provisioned by an earlier version. `dbosctl sysdb migrate
+  --app-role` grants the `dbos` schema to exactly one role, so `CONNECT`
+  for the other three only bought a session in which every query failed.
+
+Two related traps when working on the DBOS system db:
+
+- `--app-role` must be the **application** role. `dbosctl` emits
+  `GRANT ALL PRIVILEGES` (verify with `--print-user-role`); it has no
+  read-only mode, so pointing it at a `_readonly` tier silently makes
+  that tier read/write.
+- `dbos.workflow_status` stores serialized workflow `inputs`, `output`
+  and `request` plus the authenticated user and roles. Read access there
+  exposes application payloads and caller identity, so widen it via a
+  column-projecting **view**, never by granting `SELECT` on the table.
 
 If asked to change this default, or to run the roles script standalone,
 remember: omitting `-v create_app_schema=...` behaves as `true` (full
@@ -157,6 +177,16 @@ blocks, which is why the temp-table indirection exists — don't
 block, it will silently fail to substitute). Every dynamic identifier
 (role name, schema name) must go through `EXECUTE format('...', %I, ...)`
 rather than being spliced into a plain SQL string.
+
+One more trap in that file: the revoke that strips PUBLIC's implicit
+`EXECUTE` on application-schema functions is deliberately **global**
+(`ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`, no
+`IN SCHEMA`). The schema-scoped spelling reports success and does
+nothing — a schema-scoped default is merged with the built-in default
+rather than replacing it, and an ACL cannot record a negative, so PUBLIC
+keeps `EXECUTE` and every new function still comes out with `=X`. Don't
+"scope it properly" to the app schema; that silently reopens a
+`SECURITY DEFINER` escalation path past the read-only tiers.
 
 `create_app_schema`, by contrast, is a plain psql variable gated with
 `\if :create_app_schema ... \endif` (a psql meta-command, evaluated by
