@@ -16,11 +16,11 @@ Everything runs under a **master (admin) account** and is safe to re-run.
 | [`setup-database-roles.pgsql.sql`](#setup-database-rolespgsqlsql) | SQL | The role + grant logic for a **single** database. Applied by the script above; can also be run on its own. |
 | [`create-login.sh`](#create-loginsh) | bash + psql | Creates or updates **one** login role and attaches it to exactly one permission role. |
 | [`create-login.pgsql.sql`](#create-loginpgsqlsql) | SQL | The create-or-update-and-attach logic for a single login. Driven by the script above. |
-| [`migrate-dbos-system.sh`](#migrate-dbos-systemsh) | bash + dbos CLI | Runs `dbos migrate` to create the DBOS system tables in an app's `<app>_dbos_system` database and grants a permission role access to them. |
+| [`migrate-dbos-system.sh`](#migrate-dbos-systemsh) | bash + dbosctl | Runs `dbosctl sysdb migrate` to create the DBOS system tables in an app's `<app>_dbos_system` database and grants a permission role access to them. |
 
 The three `.sh` files are the entry points you run. The two `.pgsql.sql`
 files hold the SQL that the first two execute and are read from the same
-directory; `migrate-dbos-system.sh` instead drives the DBOS Go CLI.
+directory; `migrate-dbos-system.sh` instead drives the `dbosctl` binary.
 
 ---
 
@@ -303,11 +303,16 @@ which routes it through a prompt / env var instead.)
 ## `migrate-dbos-system.sh`
 
 Runs the DBOS system-table migration against an application's
-`<app>_dbos_system` database using the **DBOS Go CLI**
-(`github.com/dbos-inc/dbos-transact-golang/cmd/dbos`).
+`<app>_dbos_system` database using **`dbosctl`**
+(`github.com/dbos-inc/dbos-ctl`), which ships as a prebuilt,
+statically-linked binary — **no Go toolchain required**. (This is a
+different tool from the `dbos` CLI in `dbos-transact-golang`; the two
+are separate projects. `dbosctl`'s `sysdb` commands manage the same
+DBOS system schema, but that schema is shared across every DBOS
+language SDK, not Go-specific.)
 
-`dbos migrate` creates the DBOS system tables (in the `dbos` schema by
-default: `workflow_status`, `operation_outputs`, `queues`,
+`dbosctl sysdb migrate` creates the DBOS system tables (in the `dbos`
+schema by default: `workflow_status`, `operation_outputs`, `queues`,
 `notifications`, etc.). Its `--app-role` flag grants the role your DBOS
 application runs as — one of the four permission roles for your
 namespace — `USAGE` on the `dbos` schema and full DML on those tables,
@@ -326,25 +331,27 @@ Run it under the **master** account.
 | `-c <conninfo>` | yes | Password-less `postgres://` / `postgresql://` **URI** for the DBOS system db (its user and database), e.g. `postgresql://admin@localhost:5432/orders_api_dbos_system`. |
 | `-n <namespace>` | yes | Root namespace the permission roles were created under. Used to validate `-r` and to build its default. |
 | `-r <app_role>` | no | Permission role your app runs as; granted access to the system tables. Default `<namespace>_application`. |
-| `-s <schema>` | no | DBOS schema name. Default is the CLI's own default, `dbos`. |
-| `-i` | no | Install the `dbos` CLI via `go install` if it isn't on PATH. |
+| `-s <schema>` | no | DBOS schema name. Default is `dbosctl`'s own default, `dbos`. |
+| `-i` | no | Install `dbosctl` via its official install script if it isn't on PATH (still no Go toolchain required). |
 | `-h` | | Show help. |
 
 Unlike the other scripts, `-c` must be a **URI** (not a keyword string):
 the script injects the prompted password into the URI and passes the
-result to the CLI via the `DBOS_SYSTEM_DATABASE_URL` environment
+result to `dbosctl` via the `DBOS_SYSTEM_DATABASE_URL` environment
 variable, keeping it out of `argv`.
 
 **Prerequisites**
 
 - The `<app>_dbos_system` database already exists (created by
   `create-application-databases.sh -a <app>`).
-- Go 1.23+ and the `dbos` CLI on PATH — install with:
+- `dbosctl` on PATH — install with (no Go toolchain needed; downloads a
+  checksummed, statically-linked binary for your platform):
   ```bash
-  go install github.com/dbos-inc/dbos-transact-golang/cmd/dbos@latest
+  curl -sSfL https://raw.githubusercontent.com/dbos-inc/dbos-ctl/main/install.sh | sh
   ```
-  and put `$(go env GOPATH)/bin` on your PATH, or pass `-i` to let the
-  script install it.
+  or download a release archive directly from
+  [github.com/dbos-inc/dbos-ctl/releases](https://github.com/dbos-inc/dbos-ctl/releases),
+  or pass `-i` to let the script install it for you.
 
 **Example**
 
@@ -356,33 +363,32 @@ variable, keeping it out of `argv`.
 # and grants acme_application access to them
 ```
 
-Re-running is idempotent — the CLI reports
-`DBOS migrations completed successfully` and leaves existing tables in
-place.
+Re-running is idempotent — migrations already recorded are skipped, and
+a database that is up to date is left alone.
 
 ### Why still run `setup-database-roles.pgsql.sql` on the system db?
 
 DBOS keeps all its tables in the **`dbos`** schema, never `public` or
-your application schema, and `dbos migrate --app-role` grants your role
-everything it needs there. So the application-schema **table/sequence
-grants** from `setup-database-roles.pgsql.sql` would be entirely unused
-in the system database.
+your application schema, and `dbosctl sysdb migrate --app-role` grants
+your role everything it needs there. So the application-schema **table/
+sequence grants** from `setup-database-roles.pgsql.sql` would be
+entirely unused in the system database.
 
-`dbos migrate` does **not**, however, lock down `PUBLIC` or grant the app
-role an explicit database `CONNECT` — after a bare migrate the role can
-only connect because Postgres' default `PUBLIC` `CONNECT` is still open,
-which means *any* role could connect and use the system db's `public`
-schema. `setup-database-roles.pgsql.sql` is what closes that: it revokes
-the default `PUBLIC` grants, locks down `public`, and gives the app role
-an explicit `CONNECT`.
+`dbosctl sysdb migrate` does **not**, however, lock down `PUBLIC` or
+grant the app role an explicit database `CONNECT` — after a bare
+migrate the role can only connect because Postgres' default `PUBLIC`
+`CONNECT` is still open, which means *any* role could connect and use
+the system db's `public` schema. `setup-database-roles.pgsql.sql` is
+what closes that: it revokes the default `PUBLIC` grants, locks down
+`public`, and gives the app role an explicit `CONNECT`.
 
 So `create-application-databases.sh` still runs
 `setup-database-roles.pgsql.sql` against the system db — but with
 `create_app_schema=false`, so it only does the **`public`/`PUBLIC`
 lockdown + explicit `CONNECT`** part; it skips creating an application
-schema there, since nothing would ever use it. `dbos migrate` then
-layers the `dbos`-schema grants on top, leaving the `dbos` schema itself
-intact.
+schema there, since nothing would ever use it. `dbosctl sysdb migrate`
+then layers the `dbos`-schema grants on top, leaving the `dbos` schema
+itself intact.
 
 ---
 
@@ -420,7 +426,7 @@ same login created in step 3 therefore works for both `orders_api` and
 
 - **Idempotent.** All five scripts are safe to re-run; role creation is
   guarded, every `GRANT`/`REVOKE` is a no-op when already in effect, and
-  `dbos migrate` skips tables that already exist.
+  `dbosctl sysdb migrate` skips migrations already recorded.
 - **DDL stays with the master account.** The permission roles cannot
   create objects; create tables as the admin in the application schema
   (the default `search_path` resolves there), and the default privileges

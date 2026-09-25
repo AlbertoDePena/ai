@@ -39,7 +39,7 @@ scripts/
   setup-database-roles.pgsql.sql    # role/grant logic for ONE database (invoked by the script above)
   create-login.sh                   # create/update one login, attach to one permission role
   create-login.pgsql.sql            # SQL behind create-login.sh
-  migrate-dbos-system.sh            # run `dbos migrate`, grant the app role access to DBOS tables
+  migrate-dbos-system.sh            # run `dbosctl sysdb migrate`, grant the app role access to DBOS tables
 references/
   README.md                         # full documentation: role model, all options, workflow, gotchas
 ```
@@ -135,7 +135,7 @@ flag just controls whether that run actually creates the schema.
 
 When `false`, role creation, the `public`/`PUBLIC` lockdown, and each
 role's `CONNECT` grant still happen (that's the actual reason to run
-this script against the DBOS system db at all — DBOS's own `dbos
+this script against the DBOS system db at all — `dbosctl sysdb
 migrate` never does that hardening); only the application-schema
 creation and its schema-level grants are skipped. This avoids leaving a
 pointless, empty app schema sitting in the DBOS system database, since

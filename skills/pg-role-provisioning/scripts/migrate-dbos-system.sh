@@ -4,15 +4,20 @@
 #
 # Apply the DBOS system-table migration to an application's DBOS
 # system database (the <app>_dbos_system database created by
-# create-application-databases.sh), using the DBOS Go CLI:
+# create-application-databases.sh), using dbosctl:
 #
-#   github.com/dbos-inc/dbos-transact-golang/cmd/dbos   ->  `dbos migrate`
+#   github.com/dbos-inc/dbos-ctl   ->  `dbosctl sysdb migrate`
 #
-# `dbos migrate` creates the DBOS system tables (in the `dbos`
-# schema by default). Its --app-role flag grants the role your DBOS
-# application runs as (a permission role, e.g. <namespace>_application)
-# the privileges it needs on those system tables — so this ties the
-# DBOS schema into the same role model as the rest of these scripts.
+# dbosctl ships as a prebuilt, statically-linked binary (Linux/macOS/
+# Windows, amd64/arm64) — no Go toolchain required. It's a separate
+# tool from the `dbos` CLI in the dbos-transact-golang repo, but its
+# `sysdb migrate` subcommand does the same job: it creates the DBOS
+# system tables (in the `dbos` schema by default) and, via --app-role,
+# grants the role your DBOS application runs as (a permission role,
+# e.g. <namespace>_application) the privileges it needs on those
+# tables — so this ties the DBOS schema into the same role model as
+# the rest of these scripts. The system schema itself is shared by
+# every DBOS language SDK, not Go-specific.
 #
 # Run it under the MASTER (admin) account: creating the schema/tables
 # and granting the app role both require admin rights.
@@ -35,13 +40,16 @@
 #   -r <app_role>    Permission role your DBOS app runs as; granted
 #                    access to the DBOS system tables (default:
 #                    <namespace>_application).
-#   -s <schema>      DBOS schema name (default: the CLI default, `dbos`).
-#   -i               Install the dbos CLI via `go install` if missing.
+#   -s <schema>      DBOS schema name (default: dbosctl's own default,
+#                    `dbos`).
+#   -i               Install dbosctl (prebuilt binary, no Go toolchain
+#                    required) via its official install script if
+#                    missing.
 #   -h               Show this help.
 #
 # PASSWORD
 #   The master password is prompted for (hidden) and injected into the
-#   connection URL, which is passed to the CLI via the
+#   connection URL, which is passed to dbosctl via the
 #   DBOS_SYSTEM_DATABASE_URL environment variable — so it never lands
 #   in argv or shell history. Set PGPASSWORD to skip the prompt
 #   (unattended). A blank entry defers to ~/.pgpass. Keep the password
@@ -50,7 +58,8 @@
 # PREREQUISITES
 #   * The <app>_dbos_system database already exists
 #     (create-application-databases.sh -a <app>).
-#   * Go 1.23+ and the dbos CLI on PATH (or pass -i to install it).
+#   * dbosctl on PATH (or pass -i to install it — no Go toolchain
+#     needed either way).
 #
 # EXAMPLE
 #   ./migrate-dbos-system.sh \
@@ -69,7 +78,8 @@ NAMESPACE=""
 SCHEMA=""
 DO_INSTALL=false
 
-DBOS_PKG="github.com/dbos-inc/dbos-transact-golang/cmd/dbos@latest"
+DBOSCTL_INSTALL_URL="https://raw.githubusercontent.com/dbos-inc/dbos-ctl/main/install.sh"
+DBOSCTL_RELEASES_URL="https://github.com/dbos-inc/dbos-ctl/releases"
 
 # Print the leading comment header (line 2 up to the first
 # non-comment line) as help text.
@@ -135,35 +145,41 @@ if [[ "$role_ok" != true ]]; then
     exit 2
 fi
 
-# -------- ensure the dbos CLI is available --------
-if ! command -v dbos >/dev/null 2>&1; then
+# -------- ensure dbosctl is available --------
+# dbosctl ships as a prebuilt, statically-linked binary — no Go
+# toolchain required, unlike the older dbos-transact-golang CLI this
+# script used to drive.
+if ! command -v dbosctl >/dev/null 2>&1; then
     if [[ "$DO_INSTALL" == true ]]; then
-        if ! command -v go >/dev/null 2>&1; then
-            echo "ERROR: 'go' is required to install the dbos CLI but was not found." >&2
-            exit 1
-        fi
-        echo "==> Installing dbos CLI: go install ${DBOS_PKG}"
-        go install "$DBOS_PKG"
-        # Make sure the freshly installed binary is reachable.
-        PATH="$(go env GOPATH)/bin:$PATH"
+        echo "==> Installing dbosctl (prebuilt binary; no Go toolchain required)..."
+        echo "==> curl -sSfL ${DBOSCTL_INSTALL_URL} | sh"
+        curl -sSfL "$DBOSCTL_INSTALL_URL" | sh
+        # The installer places the binary in the first writable of
+        # /usr/local/bin, ~/.local/bin, or the current directory.
+        # Make sure a user-local bin dir is reachable if that's where
+        # it landed.
+        PATH="$HOME/.local/bin:$PATH"
         export PATH
     fi
 fi
 
-if ! command -v dbos >/dev/null 2>&1; then
+if ! command -v dbosctl >/dev/null 2>&1; then
     cat >&2 <<EOF
-ERROR: the 'dbos' CLI is not on your PATH.
-Install it with:
-  go install ${DBOS_PKG}
-and ensure "\$(go env GOPATH)/bin" is on your PATH — or re-run this
-script with -i to install it automatically.
+ERROR: the 'dbosctl' CLI is not on your PATH.
+Install it with (no Go toolchain required — downloads a prebuilt,
+checksummed, statically-linked binary):
+  curl -sSfL ${DBOSCTL_INSTALL_URL} | sh
+or download a release archive directly from:
+  ${DBOSCTL_RELEASES_URL}
+and ensure it's on your PATH — or re-run this script with -i to
+install it automatically.
 EOF
     exit 1
 fi
 
 # -------- master password --------
 # Take from PGPASSWORD (unattended) or a hidden prompt. Inject it into
-# the URI userinfo and hand the whole thing to the CLI via an env var,
+# the URI userinfo and hand the whole thing to dbosctl via an env var,
 # so no password appears in argv. Blank => leave the URI password-less
 # and let libpq/pgx fall back to ~/.pgpass.
 if [[ -n "${PGPASSWORD:-}" ]]; then
@@ -195,7 +211,10 @@ export DBOS_SYSTEM_DATABASE_URL
 unset _pw
 
 # -------- run the migration --------
-migrate_args=(migrate --app-role "$APP_ROLE")
+# dbosctl's sysdb commands take a database URL directly (from
+# $DBOS_SYSTEM_DATABASE_URL here) rather than a profile — they talk to
+# Postgres, not Conductor, so no login/profile setup is needed.
+migrate_args=(sysdb migrate --app-role "$APP_ROLE")
 if [[ -n "$SCHEMA" ]]; then
     migrate_args+=(--schema "$SCHEMA")
 fi
@@ -203,11 +222,11 @@ fi
 echo "==> System db     : ${CONNINFO##*@}"   # host:port/db, no userinfo
 echo "==> Namespace     : ${NAMESPACE}"
 echo "==> App role      : ${APP_ROLE}"
-echo "==> Schema        : ${SCHEMA:-dbos (CLI default)}"
-echo "==> Running: dbos ${migrate_args[*]}"
+echo "==> Schema        : ${SCHEMA:-dbos (dbosctl default)}"
+echo "==> Running: dbosctl ${migrate_args[*]}"
 echo
 
-dbos "${migrate_args[@]}"
+dbosctl "${migrate_args[@]}"
 
 echo
 echo "==> Done. DBOS system tables migrated; '${APP_ROLE}' granted access."
