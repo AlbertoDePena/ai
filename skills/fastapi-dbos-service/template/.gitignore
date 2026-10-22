@@ -1,0 +1,11 @@
+.env
+.env.local
+
+# Python virtual environment (regenerate with: python3.12 -m venv .venv && pip install -r requirements.txt)
+.venv/
+
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json

@@ -1,0 +1,41 @@
+fastapi==0.115.2
+uvicorn[standard]==0.30.6
+jinja2==3.1.4
+pydantic==2.9.2
+
+# Azure AD auth
+fastapi-azure-auth==5.0.1
+
+# S3-compatible storage (Silo locally, real S3 in prod - same client)
+# boto3 version is pinned by aioboto3's aiobotocore dependency, do not pin separately
+aioboto3==13.1.1
+
+# Durable workflows / queue, backed by Postgres
+dbos==1.14.0
+
+# Kafka/Redpanda. The worker produces with this directly; the consumer reaches
+# it through @DBOS.kafka_consumer, which imports confluent_kafka itself (this is
+# what the `dbos[kafka]` extra would pull in - pinned here explicitly instead).
+confluent-kafka==2.5.3
+
+# Postgres driver for the application DB (separate from the DBOS system DB,
+# which DBOS manages itself). [pool] adds psycopg_pool.
+psycopg[binary,pool]==3.3.5
+
+# OpenTelemetry - core
+opentelemetry-sdk==1.27.0
+opentelemetry-exporter-otlp==1.27.0
+
+# pkg_resources (imported by opentelemetry-instrumentation 0.48b0) ships with
+# setuptools, which the python:3.12-slim base image does not include. Must be
+# <81 - setuptools 81 removed the bundled pkg_resources module.
+setuptools<81
+
+# OpenTelemetry - auto instrumentation
+opentelemetry-instrumentation-fastapi==0.48b0
+opentelemetry-instrumentation-httpx==0.48b0
+opentelemetry-instrumentation-logging==0.48b0
+
+# Outbound HTTP (restapi.py - the consumer's downstream API call).
+httpx==0.27.2
+python-multipart==0.0.9

@@ -1,0 +1,40 @@
+# Both Dockerfiles `COPY . .`, so everything not excluded here lands in the
+# image. Keep the context to source + templates + requirements.txt.
+
+# Python virtualenv - 200MB+ of macOS-built deps that the image reinstalls
+# fresh anyway. By far the biggest win.
+.venv/
+
+# Python caches / bytecode (regenerated in the image)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets / local env - must never be baked into an image
+.env
+
+# Version control and local tooling
+.git/
+.gitignore
+.claude/
+
+# Not needed at runtime
+README.md
+Dockerfile.api
+Dockerfile.worker
+Dockerfile.consumer
+.dockerignore
+docker-compose.yml
+# backing/ holds local provisioning that runs INSIDE a backing container:
+# init-db.sql is bind-mounted into Postgres. Never needed in an app image.
+backing/
+CLAUDE.md
+run-local.sh
+# Migrations run out of band via dbmate on the host, not from the app images.
+migrate.sh
+db/
+
+# OS cruft
+.DS_Store

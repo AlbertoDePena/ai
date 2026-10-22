@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Orders Dashboard</title>
+    <meta http-equiv="refresh" content="5">
+    <style>
+        body { font-family: sans-serif; max-width: 720px; margin: 40px auto; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
+        .status-queued { color: #b58900; }
+        .status-processing { color: #268bd2; }
+        .status-done { color: #2aa198; }
+        form { margin-top: 20px; }
+        input { padding: 6px; margin-right: 8px; }
+        button { padding: 6px 12px; }
+        .badge { background: #eee; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; }
+    </style>
+</head>
+<body>
+    <h1>Orders Dashboard</h1>
+    <p>Signed in as <strong>{{ user.preferred_username }}</strong>
+        {% if dev_mode %}<span class="badge">DEV MODE - auth bypassed</span>{% endif %}
+    </p>
+
+    <p><em>This page is rendered server-side (SSR) - refreshes every 5s to show worker progress.</em></p>
+
+    <table>
+        <tr><th>Order ID</th><th>Item</th><th>Qty</th><th>Status</th></tr>
+        {% for order in orders %}
+        <tr>
+            <td>{{ order.id[:8] }}...</td>
+            <td>{{ order.item }}</td>
+            <td>{{ order.quantity }}</td>
+            <td class="status-{{ order.status }}">{{ order.status }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4">No orders yet - submit one below.</td></tr>
+        {% endfor %}
+    </table>
+
+    <form method="post" action="/orders" onsubmit="submitOrder(event)">
+        <input name="item" id="item" placeholder="Item name" required>
+        <input name="quantity" id="quantity" type="number" value="1" min="1" required>
+        <button type="submit">Submit order</button>
+    </form>
+
+    <script>
+        // Demo page has no JS framework - just enough to POST the form as JSON
+        // to the API route above, then let the 5s meta-refresh show progress.
+        async function submitOrder(e) {
+            e.preventDefault();
+            const item = document.getElementById('item').value;
+            const quantity = parseInt(document.getElementById('quantity').value, 10);
+            await fetch('/orders', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({item, quantity})
+            });
+            window.location.reload();
+        }
+    </script>
+</body>
+</html>

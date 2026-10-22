@@ -1,0 +1,365 @@
+# One compose project: the backing services AND the three app services.
+#
+#   docker compose up -d --build        # everything (the usual path)
+#   ./migrate.sh                        # apply the app-DB schema (first run)
+#   ./run-local.sh infra                # backing services only, to run an app
+#                                       # process on the host instead
+#
+# Everything shares this project's default network, so the app services reach
+# the backing ones by service name (postgres, redpanda, silo, mailpit,
+# aspire-dashboard) with no external network to create first.
+#
+# The stack is self-contained, so it claims the standard host ports (5432, 9000,
+# 8080, ...). If you already run another stack on them - a shared one, or a
+# second project scaffolded from this template - see README "Running alongside
+# another stack": add a docker-compose.override.yml to move this project's
+# ports. Compose merges it automatically.
+#
+# Credentials come from .env (gitignored; copy .env.example). Compose loads it
+# automatically and ${VAR:?...} fails loudly rather than starting a service with
+# blank credentials. In prod the backing services become managed ones -
+# RDS/Aurora, S3, MSK/Redpanda Cloud, SES, an OTel collector - and only the
+# three app services deploy.
+name: fastapi-dbos-demo
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Backing services. `restart: unless-stopped` because they're long-lived local
+  # infrastructure. Deliberately NO container_name: this stack ships inside each
+  # project, so a fixed name would hard-conflict with any sibling project (and
+  # with a shared stack you also run). Compose's generated names are already
+  # project-scoped - address these by SERVICE name, which is what the app
+  # services and the README use.
+  # ---------------------------------------------------------------------------
+
+  # PostgreSQL - holds both databases (see backing/init-db.sql):
+  # orders_api (the application DB) and orders_api_dbos (the DBOS system DB,
+  # shared by the worker and the consumer - one DBOS app, two processes).
+  # Names follow the pg-role-provisioning convention: <app>, <app>_dbos.
+  #   localhost:5432
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set it in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates both databases + the namespace schema. Runs ONLY on first
+      # init of an empty pgdata volume - see README if the volume already exists.
+      - ./backing/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      # -h 127.0.0.1 on purpose: during first-time initdb (which runs
+      # init-db.sql) Postgres brings up a temporary server on the Unix socket
+      # only, so a socket-based pg_isready reports "ready" before the real
+      # server accepts TCP - and the app services would connect too early.
+      # start_period keeps those early failures from counting against retries.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER} -d ${POSTGRES_DB:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  # Silo - S3-compatible object storage. A maintained community fork of the
+  # open-source MinIO server, published by the Pigsty project. Its rule is "the
+  # product is renamed, the protocol and your data are not": the S3 API, the
+  # MINIO_* env vars, and the on-disk format are unchanged, which is why the
+  # app's boto3 code and `s3.py` don't know the difference.
+  #   API:     http://localhost:9000
+  #   Console: http://localhost:9001  (the credentials below)
+  #
+  # WHY NOT MinIO, AND WHY NOT LOCALSTACK
+  #
+  # MinIO (the obvious first choice, and what this template used originally):
+  # its public images are gone. `minio/minio` and `minio/mc` both 404 on Docker
+  # Hub - the Hub API returns {"message":"object not found"} - and
+  # quay.io/minio/* requires auth. Existing stacks only still work from a local
+  # image cache; a fresh machine can't pull it. Silo exists exactly to fill
+  # that gap, which is why it's a fork and not a rewrite: same API, same
+  # MINIO_* vars, same on-disk format, so a MinIO data directory still mounts.
+  #
+  # LocalStack (the next obvious choice) was tried and rejected for two
+  # reasons:
+  #   1. Its current images refuse to start without a licence. `latest` and
+  #      every 2026.x tag exit with code 55 and "License activation failed!
+  #      ... set the LOCALSTACK_AUTH_TOKEN variable". The last line that runs
+  #      as free community edition is 4.9 - so you'd be pinned to an ageing
+  #      tag with a hard upgrade wall in front of it.
+  #   2. Community-edition S3 is IN MEMORY. Restart the container and every
+  #      bucket and object is gone (persistence is a paid feature), and there
+  #      is no web console to inspect blobs with. For a template whose API
+  #      treats S3 as its source of truth, losing blobs on restart is the
+  #      wrong default.
+  #
+  # Silo gives us: runs free (AGPLv3, no token), blobs persist on a volume,
+  # MinIO's web console is intact, and `mc` ships in the image so the
+  # healthcheck and the bucket one-shot need no extra image.
+  silo:
+    # Pinned to a dated release, not :latest. Object-storage tags have already
+    # moved under this template twice (MinIO withdrawn, LocalStack gated behind
+    # a licence), and this fork is young - a floating tag is the same bet a
+    # third time. Use the plain tag, not -distroless: that variant drops the
+    # `mc` and `sh` this file needs for the healthcheck and the bucket one-shot.
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    restart: unless-stopped
+    command: silo server /data --console-address ":9001"
+    environment:
+      # Silo keeps MinIO's variable names. These ARE the app's S3 credentials -
+      # stated once in .env, consumed here and by the app services below.
+      # Silo enforces a minimum length: user >= 3, password >= 8 characters, and
+      # refuses to start otherwise.
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:?set it in .env}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:?set it in .env}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      # Real filesystem-backed storage, so blobs survive restarts.
+      - silodata:/data
+    healthcheck:
+      # `mc` ships inside the image; this is its own readiness check.
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  # One-shot: create the bucket the app writes to, then exit. Reuses the silo
+  # image (already pulled, and it contains `mc`), so there's no extra image to
+  # fetch. The app services gate on this completing.
+  createbuckets:
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    depends_on:
+      silo:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:?set it in .env}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:?set it in .env}
+    # $$ escapes compose interpolation so the shell expands these, not compose.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set s http://silo:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing s/orders-bucket &&
+        echo "bucket ready: orders-bucket"
+
+  # Redpanda - Kafka-compatible broker. Two listeners on purpose: containers use
+  # the internal one (redpanda:9092), the host uses the external one
+  # (localhost:19092). See README "Networking".
+  redpanda:
+    image: redpandadata/redpanda:latest
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --mode=dev-container
+    ports:
+      - "19092:19092"
+    volumes:
+      - redpandadata:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Redpanda Console - web UI for inspecting topics and consumer groups.
+  #   Web UI: http://localhost:8080
+  redpanda-console:
+    image: redpandadata/console:latest
+    restart: unless-stopped
+    depends_on:
+      - redpanda
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8080:8080"
+
+  # Mailpit - local SMTP sink with a web UI; captures mail instead of sending it.
+  #   Web UI: http://localhost:8025
+  #   SMTP:   localhost:1025
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_DATABASE: /data/mailpit.db
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    volumes:
+      - mailpitdata:/data
+
+  # Aspire dashboard - local OTLP endpoint for traces/logs/metrics.
+  #   UI:   http://localhost:18888
+  #   OTLP: http://localhost:18889
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:latest
+    restart: unless-stopped
+    environment:
+      DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS: "true"
+    ports:
+      - "18888:18888"
+      - "18889:18889"
+
+  # ---------------------------------------------------------------------------
+  # App services. No container_name here either - it would also break
+  # `--scale worker=3`. And no restart policy: these fail fast on a missing
+  # database or bad credentials, and you want to see that crash rather than a
+  # crash loop hiding it.
+  # ---------------------------------------------------------------------------
+
+  # HTTP API + dashboard. Writes to S3, enqueues the DBOS workflow, reads the
+  # Postgres read model.
+  #   http://localhost:8000/dashboard
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      DEV_MODE: "true"                  # flip to false + set AZURE_* to test real auth
+      S3_ENDPOINT_URL: http://silo:9000
+      S3_FORCE_PATH_STYLE: "true"
+      # Silo's root credentials double as the app's S3 credentials locally. In
+      # prod both are unset entirely and the task's IAM role supplies them.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set it in .env}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set it in .env}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      # Note POSTGRES_PASSWORD_URLENC, not POSTGRES_PASSWORD: these are URLs, so
+      # the password must be percent-encoded. See .env.example.
+      DBOS_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api_dbos
+      # Read model the consumer populates; the API serves it at /processed-orders.
+      APP_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire-dashboard:18889
+      OTEL_SERVICE_NAME: order-api
+      ENVIRONMENT: local
+      # Real Azure AD auth: set DEV_MODE=false above, uncomment these, and put
+      # the values in .env (compose interpolates them like the other secrets).
+      # AZURE_TENANT_ID: ${AZURE_TENANT_ID}
+      # AZURE_CLIENT_ID: ${AZURE_CLIENT_ID}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      createbuckets:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    # Give uvicorn's graceful shutdown (FastAPI lifespan -> dbos_client.destroy())
+    # room before SIGKILL. Docker's default SIGTERM->SIGKILL window is 10s.
+    stop_grace_period: 20s
+
+  # DBOS queue worker. Dequeues what the API enqueued, updates S3, sends the
+  # confirmation email, publishes the order.processed event.
+  #   health: http://localhost:8001/health
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    ports:
+      - "8001:8001"
+    environment:
+      S3_ENDPOINT_URL: http://silo:9000
+      S3_FORCE_PATH_STYLE: "true"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set it in .env}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set it in .env}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      DBOS_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api_dbos
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      # Email: Mailpit locally (no auth/TLS). For SES/prod, point SMTP_HOST/PORT
+      # at the SES SMTP endpoint and set SMTP_USERNAME/SMTP_PASSWORD/SMTP_USE_TLS.
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      EMAIL_FROM: ${EMAIL_FROM:-orders@example.com}
+      # SMTP_USERNAME: ...
+      # SMTP_PASSWORD: ...
+      # SMTP_USE_TLS: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire-dashboard:18889
+      OTEL_SERVICE_NAME: order-worker
+      ENVIRONMENT: local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      createbuckets:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    # uvicorn's graceful shutdown runs the FastAPI lifespan, which drains
+    # in-flight DBOS workflows (up to ~12s) and flushes the Kafka producer.
+    stop_grace_period: 20s
+
+  # DBOS Kafka consumer. @DBOS.kafka_consumer starts one durable workflow per
+  # order.processed event: project it into Postgres, notify a downstream API.
+  #   health: http://localhost:8002/health
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    ports:
+      - "8002:8002"
+    environment:
+      # The read model the consumer's workflow writes - a DIFFERENT database
+      # from the DBOS system DB.
+      APP_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api
+      # The SAME system database as the worker and the api: the consumer is not
+      # a separate DBOS app, it is a second process of this one. Both register
+      # every workflow so either can execute whatever it dequeues or recovers -
+      # see consumer.py's docstring.
+      DBOS_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api_dbos
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      # Downstream REST API the workflow notifies. Unset = that step is skipped,
+      # which is the default since this stack has no such service.
+      EXTERNAL_API_URL: ${EXTERNAL_API_URL:-}
+      EXTERNAL_API_TOKEN: ${EXTERNAL_API_TOKEN:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire-dashboard:18889
+      OTEL_SERVICE_NAME: order-consumer
+      ENVIRONMENT: local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    # Lifespan shutdown stops the Kafka poller, drains in-flight workflows
+    # (up to ~12s), then closes the HTTP and DB pools.
+    stop_grace_period: 20s
+
+volumes:
+  pgdata:
+  silodata:
+  mailpitdata:
+  redpandadata:
