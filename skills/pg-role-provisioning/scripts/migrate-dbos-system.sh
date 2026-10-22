@@ -3,7 +3,7 @@
 # migrate-dbos-system.sh
 #
 # Apply the DBOS system-table migration to an application's DBOS
-# system database (the <app>_dbos_system database created by
+# system database (the <app>_dbos database created by
 # create-application-databases.sh), using dbosctl:
 #
 #   github.com/dbos-inc/dbos-ctl   ->  `dbosctl sysdb migrate`
@@ -32,7 +32,7 @@
 #                    WITHOUT the password (required). Must be a
 #                    postgres:// or postgresql:// URI whose user and
 #                    database are the system db, e.g.:
-#                      postgresql://admin@localhost:5432/orders_api_dbos_system
+#                      postgresql://admin@localhost:5432/orders_api_dbos
 #   -n <namespace>   Root namespace the permission roles were created
 #                    under (required). Used to validate -r and to
 #                    build the default app role. Must match the
@@ -56,14 +56,14 @@
 #   OUT of the -c string.
 #
 # PREREQUISITES
-#   * The <app>_dbos_system database already exists
+#   * The <app>_dbos database already exists
 #     (create-application-databases.sh -a <app>).
 #   * dbosctl on PATH (or pass -i to install it — no Go toolchain
 #     needed either way).
 #
 # EXAMPLE
 #   ./migrate-dbos-system.sh \
-#     -c 'postgresql://admin@localhost:5432/orders_api_dbos_system' \
+#     -c 'postgresql://admin@localhost:5432/orders_api_dbos' \
 #     -r acme_application -n acme
 #   # prompts for the master password, then creates the DBOS system
 #   # tables and grants acme_application access to them

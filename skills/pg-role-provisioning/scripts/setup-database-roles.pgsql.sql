@@ -41,6 +41,19 @@
 --                 for the DBOS system db (same schema_name value in
 --                 both calls — it's just unused on the system db).
 --
+--   create_cache_table  'true' or 'false' (default). When true, the
+--                 application schema also gets an UNLOGGED `cache`
+--                 table (key/value/expires_at) and the DATABASE is
+--                 switched to synchronous_commit = off. Requires
+--                 create_app_schema=true (the table lives in the
+--                 application schema) — the combination
+--                 create_cache_table=true + create_app_schema=false
+--                 raises. Intended for a dedicated <app>_cache
+--                 database and NOTHING else: synchronous_commit is a
+--                 per-database setting, so turning it off is only
+--                 acceptable in a database that holds exclusively
+--                 disposable data. See references/cache.md.
+--
 -- SCHEMA MODEL:
 --   Application objects live in a dedicated schema (schema_name),
 --   NOT in `public`. `public` is locked down completely (no PUBLIC
@@ -75,6 +88,12 @@
 --         `<schema_name>, public`.
 --       - Grants each role the appropriate privileges (plus default
 --         privileges for future objects) on the schema_name schema.
+--   * If create_cache_table is true (requires the above):
+--       - Creates the UNLOGGED `cache` table + its expires_at index
+--         in schema_name.
+--       - Sets synchronous_commit = off on THIS database.
+--       - Grants TRUNCATE on `cache` to the two read/write tiers
+--         (the rest of its DML comes from the normal grants below).
 --
 -- It does NOT create any login roles — attach logins afterwards
 -- with create-login.pgsql.sql / Part 2 of setup-new-database.pgsql.sql.
@@ -96,6 +115,30 @@
 \if :{?create_app_schema}
 \else
 \set create_app_schema true
+\endif
+
+-- create_cache_table defaults to FALSE: only a dedicated cache
+-- database should get the cache table and the synchronous_commit
+-- relaxation that comes with it.
+\if :{?create_cache_table}
+\else
+\set create_cache_table false
+\endif
+
+-- The cache table lives in the application schema, so the two flags
+-- can't contradict each other. This has to be checked HERE rather than
+-- at the cache DDL below: that DDL sits inside the create_app_schema
+-- region, so with create_app_schema=false psql would skip it -- and
+-- any complaint written inside it -- entirely. Raise server-side so
+-- ON_ERROR_STOP gives the caller a non-zero exit.
+\if :create_cache_table
+\if :create_app_schema
+\else
+DO $$
+BEGIN
+    RAISE EXCEPTION 'create_cache_table=true requires create_app_schema=true (the cache table lives in the application schema)';
+END $$;
+\endif
 \endif
 
 CREATE TEMP TABLE _setup_params (role_prefix text, schema_name text);
@@ -330,6 +373,102 @@ BEGIN
     EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA %I FROM PUBLIC', v_schema);
 END $$;
 
+-- ---------- the cache table (create_cache_table only) ----------
+-- A key/value/expires_at cache, deliberately placed in a DEDICATED
+-- <app>_cache database rather than alongside the application tables.
+-- The reason is the database-level setting below: synchronous_commit
+-- cannot be set per table, so relaxing it for cache writes means
+-- relaxing it for everything in the database. A separate database is
+-- what keeps "losing the last few hundred milliseconds of writes on a
+-- crash" scoped to data that is disposable by definition.
+--
+-- Created HERE, before the per-role grant blocks, so the
+-- `GRANT ... ON ALL TABLES IN SCHEMA` statements below pick it up and
+-- each tier ends up with its normal DML on it. Created by this script
+-- rather than by application migrations because none of the four
+-- permission roles has CREATE on the schema.
+\if :create_cache_table
+
+DO $$
+DECLARE
+    v_schema text;
+BEGIN
+    SELECT schema_name INTO v_schema FROM _setup_params;
+
+    -- UNLOGGED: the table's contents are not WAL-logged, which is the
+    -- bulk of the write saving. The cost is that PostgreSQL TRUNCATES
+    -- the table during crash recovery (a clean shutdown/restart keeps
+    -- the rows) and that its contents never reach a physical standby,
+    -- where the relation is unreadable entirely. The table definition
+    -- always survives; only rows are lost. Callers must therefore
+    -- treat a miss on a key they just wrote as normal.
+    --
+    -- fillfactor 70 leaves room for new row versions on the same page.
+    -- Note what it does NOT buy here: HOT updates. A HOT update
+    -- requires that no indexed column change, and refreshing an entry
+    -- rewrites expires_at, which IS indexed below -- so every upsert
+    -- of an existing key is a non-HOT update that adds entries to both
+    -- indexes and leaves a dead tuple behind. That is why the
+    -- autovacuum storage parameters are tightened too: a hot-key cache
+    -- generates dead tuples far faster than the cluster defaults
+    -- expect. See references/cache.md for the index-free variant that
+    -- trades sweep cost for HOT updates.
+    EXECUTE format($fmt$
+        CREATE UNLOGGED TABLE IF NOT EXISTS %I.cache (
+            key        text        PRIMARY KEY,
+            value      jsonb       NOT NULL,
+            expires_at timestamptz NOT NULL
+        ) WITH (
+            fillfactor = 70,
+            autovacuum_vacuum_scale_factor = 0.02,
+            autovacuum_vacuum_cost_delay = 0
+        )
+    $fmt$, v_schema);
+
+    -- Serves the expiry sweep (DELETE ... WHERE expires_at <= now()),
+    -- NOT reads: a lookup is a primary-key probe on `key` that filters
+    -- expires_at from the fetched row.
+    EXECUTE format('CREATE INDEX IF NOT EXISTS cache_expires_at_idx ON %I.cache (expires_at)', v_schema);
+END $$;
+
+-- Writes here are disposable, so don't pay for durability on them.
+-- Commits lose their fsync, risking the last wal_writer_delay * 3 of
+-- cache writes on a crash -- which, for a cache in its own database,
+-- is a miss rather than a loss. Note this is NOT redundant with
+-- UNLOGGED: an unlogged table writes no WAL for its *data*, but a
+-- write transaction still assigns an XID and writes a commit record,
+-- and that record is fsynced unless synchronous_commit is off.
+--
+-- Takes effect for NEW sessions (existing connections keep their
+-- current value), and it is a *database* setting, so an
+-- `ALTER ROLE ... SET synchronous_commit` on the login role outranks
+-- it -- check with `\drds` if cache writes look slower than expected.
+DO $$
+BEGIN
+    EXECUTE format('ALTER DATABASE %I SET synchronous_commit = off', current_database());
+END $$;
+
+-- TRUNCATE is the right way to flush a cache wholesale and is far
+-- cheaper than a full DELETE, but it isn't part of the DML the grant
+-- blocks below hand out, so grant it explicitly -- on this one table,
+-- and only to the two read/write tiers.
+DO $$
+DECLARE
+    v_role_prefix text;
+    v_schema      text;
+    v_role        text;
+BEGIN
+    SELECT role_prefix, schema_name INTO v_role_prefix, v_schema FROM _setup_params;
+    FOREACH v_role IN ARRAY ARRAY[
+        v_role_prefix || '_application',
+        v_role_prefix || '_developer'
+    ] LOOP
+        EXECUTE format('GRANT TRUNCATE ON TABLE %I.cache TO %I', v_schema, v_role);
+    END LOOP;
+END $$;
+
+\endif
+
 -- ---------- <role_prefix>_application — read/write, for application logins ----------
 DO $$
 DECLARE
@@ -433,6 +572,21 @@ SELECT current_database() AS database,
        pg_catalog.pg_get_userbyid(n.nspowner) AS owner
 FROM pg_namespace n
 WHERE n.nspname = 'public';
+\endif
+
+\if :create_cache_table
+-- Confirm the cache table is actually UNLOGGED ('u') and that the
+-- database-level synchronous_commit override is recorded.
+SELECT current_database()          AS database,
+       n.nspname || '.' || c.relname AS cache_table,
+       c.relpersistence = 'u'      AS unlogged,
+       (SELECT s.setconfig
+          FROM pg_db_role_setting s
+         WHERE s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND s.setrole = 0)      AS database_settings
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace, _setup_params p
+WHERE n.nspname = p.schema_name AND c.relname = 'cache';
 \endif
 
 DROP TABLE _setup_params;
