@@ -12,11 +12,16 @@ Everything runs under a **master (admin) account** and is safe to re-run.
 
 | Script | Kind | What it does |
 | --- | --- | --- |
-| [`create-application-databases.sh`](#create-application-databasessh) | bash + psql | Creates an application database **and** its DBOS system database, then applies the roles/grants to each. |
+| [`create-application-databases.sh`](#create-application-databasessh) | bash + psql | Creates an application database, its DBOS system database **and** its cache database, then applies the roles/grants to each. |
 | [`setup-database-roles.pgsql.sql`](#setup-database-rolespgsqlsql) | SQL | The role + grant logic for a **single** database. Applied by the script above; can also be run on its own. |
 | [`create-login.sh`](#create-loginsh) | bash + psql | Creates or updates **one** login role and attaches it to exactly one permission role. |
 | [`create-login.pgsql.sql`](#create-loginpgsqlsql) | SQL | The create-or-update-and-attach logic for a single login. Driven by the script above. |
-| [`migrate-dbos-system.sh`](#migrate-dbos-systemsh) | bash + dbosctl | Runs `dbosctl sysdb migrate` to create the DBOS system tables in an app's `<app>_dbos_system` database and grants a permission role access to them. |
+| [`migrate-dbos-system.sh`](#migrate-dbos-systemsh) | bash + dbosctl | Runs `dbosctl sysdb migrate` to create the DBOS system tables in an app's `<app>_dbos` database and grants a permission role access to them. |
+
+[`cache.md`](cache.md) documents the `<app>_cache` database on its own:
+the table, its query patterns, and the trade-offs of caching in
+PostgreSQL. Read it before relying on the cache in anger — `UNLOGGED` +
+`synchronous_commit = off` buy real throughput at a real cost.
 
 The three `.sh` files are the entry points you run. The two `.pgsql.sql`
 files hold the SQL that the first two execute and are read from the same
@@ -82,6 +87,11 @@ Key properties of the model:
   through membership in one of the four roles on the application schema.
 - **Default privileges** are set so the roles automatically get the
   right access on **future** objects created in the application schema.
+- **`TRUNCATE` is granted on one table only.** In the cache database,
+  `<namespace>_application` and `<namespace>_developer` get `TRUNCATE`
+  on `cache` (flushing a cache wholesale is the point, and `TRUNCATE`
+  beats `DELETE` for it). No other table, in any database, grants it —
+  `TRUNCATE` is not part of the DML the role model hands out.
 - The permission roles are cluster-wide; their **grants are per-database**.
   Creating a new database re-runs the grants for that database.
 
@@ -136,12 +146,26 @@ Passwords are **prompted for (hidden)** by default so they never land in
 
 ## `create-application-databases.sh`
 
-Creates two databases for an application and applies the role model to
+Creates three databases for an application and applies the role model to
 each:
 
 - `<app>` — the application database
-- `<app>_dbos_system` — its DBOS system database (DBOS' default
-  `<app_db_name>_dbos_system` convention)
+- `<app>_cache` — its cache database: the full role/schema treatment
+  plus an `UNLOGGED` `cache` table and `synchronous_commit = off`.
+  Skip it with `-k`. See [`cache.md`](cache.md) for why the cache gets a
+  database of its own (short version: `synchronous_commit` is a
+  per-database setting, and you do not want it off in `<app>`).
+- `<app>_dbos` — its DBOS system database. Only the
+  `<namespace>_application` role can reach it; DBOS keeps its tables in
+  its own `dbos` schema, created later by `migrate-dbos-system.sh`.
+
+  > `<app>_dbos` is deliberately **shorter** than the name DBOS derives
+  > from the application database name on its own, so the application
+  > has to be pointed at it explicitly — set `DBOS_SYSTEM_DATABASE_URL`
+  > (or the equivalent field in its DBOS config) to this database.
+  > Nothing in this toolkit derives the name: both
+  > `migrate-dbos-system.sh` and `dbosctl sysdb migrate` take the
+  > system database URL as an argument.
 
 It connects once to the maintenance db in the connection string, creates
 the databases (idempotently — skipped if they already exist), then uses
@@ -153,15 +177,16 @@ namespace and schema name as psql variables.
 
 ```
 ./create-application-databases.sh -c <conninfo> -a <app_name> \
-    -n <namespace> [-s <schema>]
+    -n <namespace> [-s <schema>] [-k]
 ```
 
 | Option | Required | Description |
 | --- | --- | --- |
 | `-c <conninfo>` | yes | Master connection string (password-less). |
-| `-a <app_name>` | yes | Application db name. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. The DBOS system db name is derived as `<app_name>_dbos_system`. |
+| `-a <app_name>` | yes | Application db name. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. The other two db names are derived from it: `<app_name>_cache` and `<app_name>_dbos`. |
 | `-n <namespace>` | yes | Root namespace for the four permission roles. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. |
 | `-s <schema>` | no | Application schema name. Default: same as `<namespace>`. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. |
+| `-k` | no | Skip the `<app>_cache` database. Use it when the app has no cache or caches elsewhere; otherwise it's created even if unused, since an empty cache table costs nothing. |
 | `-h` | | Show help. |
 
 **Example**
@@ -171,9 +196,10 @@ namespace and schema name as psql variables.
   -c 'postgresql://admin@localhost:5432/postgres' \
   -a orders_api -n acme
 # prompts for the master password, then creates:
-#   orders_api  and  orders_api_dbos_system
+#   orders_api, orders_api_cache  and  orders_api_dbos
 # with permission roles acme_application, acme_application_readonly,
-# acme_developer, acme_developer_readonly granted on schema "acme"
+# acme_developer, acme_developer_readonly granted on schema "acme",
+# and acme.cache (unlogged) in orders_api_cache
 ```
 
 Re-running is a safe no-op: existing databases are left in place and the
@@ -208,19 +234,35 @@ The role + grant logic for **one** database, scoped to whatever database
    `search_path` to `<schema_name>, public`, and grants each role the
    appropriate schema privileges plus default privileges for future
    objects.
+5. **Only when `create_cache_table` is true:** creates the `UNLOGGED`
+   `cache` table and its `expires_at` index in the application schema,
+   sets `synchronous_commit = off` on the database, and grants
+   `TRUNCATE` on `cache` to the two read/write tiers. Requires
+   `create_app_schema=true` — the contradictory combination raises
+   rather than silently doing nothing.
 
 It does **not** create any logins, and it leaves the `dbos` schema
 (managed by `migrate-dbos-system.sh`) untouched.
 
 Takes two required psql variables, `role_prefix` and `schema_name`, and
-one optional variable, `create_app_schema` (`true`/`false`, default
-`true` if omitted). `create-application-databases.sh` supplies all of
-these — `role_prefix` and `schema_name` via `-v` (the same `schema_name`
-value for both the app and system databases), and `create_app_schema`
-via `\set` per database (`true` for the app db, `false` for the DBOS
-system db, since DBOS keeps its tables in its own `dbos` schema and
-never touches the application schema — see "Why still run
-`setup-database-roles.pgsql.sql` on the system db?" below).
+two optional ones: `create_app_schema` (`true`/`false`, default `true`)
+and `create_cache_table` (`true`/`false`, default `false`).
+`create-application-databases.sh` supplies all of these — `role_prefix`
+and `schema_name` via `-v` (the same `schema_name` value for all three
+databases), and the two flags via `\set` per database:
+
+| Database | `create_app_schema` | `create_cache_table` |
+| --- | --- | --- |
+| `<app>` | `true` | `false` |
+| `<app>_cache` | `true` | `true` |
+| `<app>_dbos` | `false` | `false` |
+
+`create_app_schema` is `false` for the system db because DBOS keeps its
+tables in its own `dbos` schema and never touches the application schema
+— see "Why still run `setup-database-roles.pgsql.sql` on the system db?"
+below. `create_cache_table` is `true` for exactly one database by
+design: it carries a `synchronous_commit = off` that belongs nowhere
+else.
 
 **Run it directly** (e.g. to re-apply grants to an existing database):
 
@@ -234,12 +276,23 @@ psql -v ON_ERROR_STOP=1 \
 
 # Lockdown + CONNECT only, no application schema (e.g. a DBOS system db)
 psql -v ON_ERROR_STOP=1 \
-  'postgresql://admin@localhost:5432/orders_api_dbos_system' \
+  'postgresql://admin@localhost:5432/orders_api_dbos' \
   -v role_prefix=acme \
   -v schema_name=acme \
   -v create_app_schema=false \
   -f setup-database-roles.pgsql.sql
+
+# Full treatment + the unlogged cache table + synchronous_commit=off
+psql -v ON_ERROR_STOP=1 \
+  'postgresql://admin@localhost:5432/orders_api_cache' \
+  -v role_prefix=acme \
+  -v schema_name=acme \
+  -v create_cache_table=true \
+  -f setup-database-roles.pgsql.sql
 ```
+
+> Only point that last one at a database whose **entire** contents are
+> disposable — it relaxes durability for everything in it.
 
 ---
 
@@ -321,7 +374,7 @@ which routes it through a prompt / env var instead.)
 ## `migrate-dbos-system.sh`
 
 Runs the DBOS system-table migration against an application's
-`<app>_dbos_system` database using **`dbosctl`**
+`<app>_dbos` database using **`dbosctl`**
 (`github.com/dbos-inc/dbos-ctl`), which ships as a prebuilt,
 statically-linked binary — **no Go toolchain required**. (This is a
 different tool from the `dbos` CLI in `dbos-transact-golang`; the two
@@ -346,7 +399,7 @@ Run it under the **master** account.
 
 | Option | Required | Description |
 | --- | --- | --- |
-| `-c <conninfo>` | yes | Password-less `postgres://` / `postgresql://` **URI** for the DBOS system db (its user and database), e.g. `postgresql://admin@localhost:5432/orders_api_dbos_system`. |
+| `-c <conninfo>` | yes | Password-less `postgres://` / `postgresql://` **URI** for the DBOS system db (its user and database), e.g. `postgresql://admin@localhost:5432/orders_api_dbos`. |
 | `-n <namespace>` | yes | Root namespace the permission roles were created under. Used to validate `-r` and to build its default. |
 | `-r <app_role>` | no | Permission role your app runs as; granted access to the system tables. Default `<namespace>_application`. |
 | `-s <schema>` | no | DBOS schema name. Default is `dbosctl`'s own default, `dbos`. |
@@ -360,7 +413,7 @@ variable, keeping it out of `argv`.
 
 **Prerequisites**
 
-- The `<app>_dbos_system` database already exists (created by
+- The `<app>_dbos` database already exists (created by
   `create-application-databases.sh -a <app>`).
 - `dbosctl` on PATH — install with (no Go toolchain needed; downloads a
   checksummed, statically-linked binary for your platform):
@@ -375,7 +428,7 @@ variable, keeping it out of `argv`.
 
 ```bash
 ./migrate-dbos-system.sh \
-  -c 'postgresql://admin@localhost:5432/orders_api_dbos_system' \
+  -c 'postgresql://admin@localhost:5432/orders_api_dbos' \
   -r acme_application -n acme
 # prompts for the master password, creates the DBOS system tables,
 # and grants acme_application access to them
@@ -430,12 +483,13 @@ export PATH="/opt/homebrew/opt/libpq/bin:$PATH"   # macOS/Homebrew psql
 CONN='postgresql://admin@localhost:5432/postgres'
 NS='acme'   # pick your namespace once, reuse it everywhere below
 
-# 1. Provision the application + DBOS system databases
+# 1. Provision the application + cache + DBOS system databases
+#    (add -k to skip the cache db)
 ./create-application-databases.sh -c "$CONN" -a orders_api -n "$NS"
 
 # 2. Migrate the DBOS system database (creates the dbos schema/tables)
 ./migrate-dbos-system.sh \
-  -c 'postgresql://admin@localhost:5432/orders_api_dbos_system' \
+  -c 'postgresql://admin@localhost:5432/orders_api_dbos' \
   -r "${NS}_application" -n "$NS" -i
 
 # 3. Attach a read/write service account for the app
@@ -448,16 +502,27 @@ NS='acme'   # pick your namespace once, reuse it everywhere below
 Because the DBOS system database also uses the namespace's permission
 roles, grant the application's DBOS login the `<namespace>_application`
 role (read/write) — DBOS needs write access to its system database. The
-same login created in step 3 therefore works for both `orders_api` and
-`orders_api_dbos_system`.
+same login created in step 3 therefore works for all three databases:
+`orders_api`, `orders_api_cache` and `orders_api_dbos`. There is
+no separate cache login to create.
+
+The cache database does, however, need its **own connection/pool** in
+the application — it is a different database, so nothing about it is
+reachable from an `orders_api` session. Point a second pool at
+`postgresql://<login>@host:5432/orders_api_cache` and read
+[`cache.md`](cache.md) before you depend on what it stores.
 
 ---
 
 ## Notes & conventions
 
 - **Idempotent.** All five scripts are safe to re-run; role creation is
-  guarded, every `GRANT`/`REVOKE` is a no-op when already in effect, and
-  `dbosctl sysdb migrate` skips migrations already recorded.
+  guarded, every `GRANT`/`REVOKE` is a no-op when already in effect, the
+  cache table/index use `IF NOT EXISTS`, and `dbosctl sysdb migrate`
+  skips migrations already recorded. Re-running never drops cache rows —
+  but note that `CREATE TABLE IF NOT EXISTS` also never *changes* an
+  existing table, so altering the cache DDL here won't migrate a cache
+  table that already exists. Drop it (it's disposable) and re-run.
 - **DDL stays with the master account.** The permission roles cannot
   create objects; create tables as the admin in the application schema
   (the default `search_path` resolves there), and the default privileges
@@ -475,3 +540,11 @@ same login created in step 3 therefore works for both `orders_api` and
   actually created.
 - **Dropping a database in use** requires terminating open sessions;
   on Postgres 13+ use `DROP DATABASE <name> WITH (FORCE)`.
+- **One application, three databases.** `<app>`, `<app>_cache` and
+  `<app>_dbos` all share the namespace's roles and schema name, so a
+  single login covers all three — but each is a separate connection, and
+  nothing is transactional across them.
+- **`<app>_dbos` must be configured, not inferred.** It is shorter than
+  the system-database name DBOS derives from the application database,
+  so an app that relies on that default will look for a database this
+  toolkit never created.
