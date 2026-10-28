@@ -3,9 +3,13 @@
 # create-application-databases.sh
 #
 # Provision a new application's PostgreSQL databases:
-#   1. <app>              -- the application database
+#   1. <app>_main         -- the application database
 #   2. <app>_cache        -- its key/value cache database (skip with -k)
 #   3. <app>_dbos         -- its DBOS system database
+#
+# All three names are derived from the -a <app_name> base: the
+# application database is <app_name>_main, NOT <app_name>. All three
+# carry a suffix so no database sits on the bare base name.
 #
 # NOTE: <app>_dbos is deliberately SHORTER than the name DBOS derives
 # from the application database on its own, so the application must be
@@ -18,7 +22,7 @@
 # All three are created on the connected server and then have the
 # <namespace>_* permission roles applied via
 # setup-database-roles.pgsql.sql (Part 1 of setup-new-database):
-#   * On <app>: full treatment — locks down the public schema,
+#   * On <app>_main: full treatment — locks down the public schema,
 #     creates the application schema, and grants the <namespace>_*
 #     roles on it. The app operates in the context of that schema.
 #   * On <app>_cache: the full treatment PLUS an UNLOGGED `cache`
@@ -26,7 +30,7 @@
 #     synchronous_commit = off on the database
 #     (create_cache_table=true). It is a separate database precisely
 #     because synchronous_commit is a per-database setting: keeping
-#     the cache out of <app> is what confines that relaxed durability
+#     the cache out of <app>_main is what confines that relaxed durability
 #     to data that is disposable by definition. See
 #     references/cache.md for the table, its query patterns, and its
 #     trade-offs.
@@ -41,7 +45,7 @@
 # You connect with a full MASTER (admin) connection string. That
 # account must be able to CREATE DATABASE and CREATE ROLE. The
 # script connects once to the database named in the connection
-# string (a maintenance db such as 'postgres'), creates the two
+# string (a maintenance db such as 'postgres'), creates the three
 # databases from there, then uses \c to hop into each new database
 # (reusing the same credentials) to apply the roles/grants.
 #
@@ -57,8 +61,12 @@
 #                      postgresql://user@host:5432/postgres
 #                      "host=localhost port=5432 user=postgres \
 #                       dbname=postgres"
-#   -a <app_name>    Application db name (required). The DBOS system
-#                    db is derived as <app_name>_dbos.
+#   -a <app_name>    Application name (required); the base all three
+#                    db names derive from -- <app_name>_main (the
+#                    application database), <app_name>_cache and
+#                    <app_name>_dbos. No database is created under the
+#                    bare <app_name>. Must match
+#                    ^[A-Za-z_][A-Za-z0-9_]*$.
 #   -n <namespace>   Root namespace for the four permission roles
 #                    (required). Produces <namespace>_application,
 #                    <namespace>_application_readonly,
@@ -84,7 +92,7 @@
 #     -c 'postgresql://admin@localhost:5432/postgres' \
 #     -a orders_api -n acme
 #   # prompts for admin's password, then creates databases:
-#   #   orders_api, orders_api_cache and orders_api_dbos,
+#   #   orders_api_main, orders_api_cache and orders_api_dbos,
 #   #   with permission roles
 #   #   acme_application, acme_application_readonly, acme_developer,
 #   #   acme_developer_readonly granted on schema "acme"
@@ -97,7 +105,7 @@ ROLES_SQL="${SCRIPT_DIR}/setup-database-roles.pgsql.sql"
 
 # -------- args --------
 CONNINFO=""
-APP_DB=""
+APP_NAME=""
 NAMESPACE=""
 SCHEMA_NAME=""
 CREATE_CACHE_DB=true
@@ -109,7 +117,7 @@ usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "${BASH_SOU
 while getopts ":c:a:n:s:kh" opt; do
     case "$opt" in
         c) CONNINFO="$OPTARG" ;;
-        a) APP_DB="$OPTARG" ;;
+        a) APP_NAME="$OPTARG" ;;
         n) NAMESPACE="$OPTARG" ;;
         s) SCHEMA_NAME="$OPTARG" ;;
         k) CREATE_CACHE_DB=false ;;
@@ -120,7 +128,7 @@ while getopts ":c:a:n:s:kh" opt; do
 done
 
 # -------- validate --------
-if [[ -z "$CONNINFO" || -z "$APP_DB" || -z "$NAMESPACE" ]]; then
+if [[ -z "$CONNINFO" || -z "$APP_NAME" || -z "$NAMESPACE" ]]; then
     echo "ERROR: -c <conninfo>, -a <app_name>, and -n <namespace> are all required." >&2
     usage >&2
     exit 2
@@ -129,8 +137,8 @@ fi
 # Database identifiers, the namespace, and the schema name are
 # interpolated into DDL, \c, and psql -v values below; keep them all
 # to a safe, predictable shape.
-if [[ ! "$APP_DB" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-    echo "ERROR: app name '$APP_DB' must match ^[A-Za-z_][A-Za-z0-9_]*\$." >&2
+if [[ ! "$APP_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "ERROR: app name '$APP_NAME' must match ^[A-Za-z_][A-Za-z0-9_]*\$." >&2
     exit 2
 fi
 
@@ -147,8 +155,9 @@ if [[ ! "$SCHEMA_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
     exit 2
 fi
 
-CACHE_DB="${APP_DB}_cache"
-SYS_DB="${APP_DB}_dbos"
+MAIN_DB="${APP_NAME}_main"
+CACHE_DB="${APP_NAME}_cache"
+SYS_DB="${APP_NAME}_dbos"
 
 if [[ ! -f "$ROLES_SQL" ]]; then
     echo "ERROR: cannot find roles script at $ROLES_SQL" >&2
@@ -168,7 +177,7 @@ if [[ -z "${PGPASSWORD:-}" ]]; then
     unset _master_pw
 fi
 
-echo "==> Application db : ${APP_DB}"
+echo "==> Application db : ${MAIN_DB}"
 if [[ "$CREATE_CACHE_DB" == true ]]; then
     echo "==> Cache db       : ${CACHE_DB} (unlogged cache table, synchronous_commit=off)"
 else
@@ -214,14 +223,15 @@ fi
 #     the \i'd roles script (invoked in the same session) can read
 #     them back with :'role_prefix' / :'schema_name'.
 #   * \i applies the permission roles/grants inside that db.
-# App/sys names are validated above, so interpolating them here is safe.
+# All three db names derive from the -a base validated above, so
+# interpolating them here is safe.
 psql -v ON_ERROR_STOP=1 --no-psqlrc \
     -v role_prefix="$NAMESPACE" \
     -v schema_name="$SCHEMA_NAME" \
     "$CONNINFO" <<SQL
-\echo '==> Ensuring database "${APP_DB}" exists...'
-SELECT format('CREATE DATABASE %I', '${APP_DB}')
-WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${APP_DB}')
+\echo '==> Ensuring database "${MAIN_DB}" exists...'
+SELECT format('CREATE DATABASE %I', '${MAIN_DB}')
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${MAIN_DB}')
 \gexec
 ${CACHE_CREATE_SQL}
 \echo '==> Ensuring database "${SYS_DB}" exists...'
@@ -229,8 +239,8 @@ SELECT format('CREATE DATABASE %I', '${SYS_DB}')
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${SYS_DB}')
 \gexec
 
-\echo '==> Applying ${NAMESPACE}_* roles + ${SCHEMA_NAME} schema to "${APP_DB}"...'
-\c ${APP_DB}
+\echo '==> Applying ${NAMESPACE}_* roles + ${SCHEMA_NAME} schema to "${MAIN_DB}"...'
+\c ${MAIN_DB}
 \set create_app_schema true
 \set create_cache_table false
 \i ${ROLES_SQL}
@@ -246,10 +256,10 @@ SQL
 
 echo
 if [[ "$CREATE_CACHE_DB" == true ]]; then
-    echo "==> Done. Created/verified '${APP_DB}', '${CACHE_DB}' and '${SYS_DB}' with ${NAMESPACE}_* roles."
+    echo "==> Done. Created/verified '${MAIN_DB}', '${CACHE_DB}' and '${SYS_DB}' with ${NAMESPACE}_* roles."
     echo "    The cache table is ${SCHEMA_NAME}.cache in '${CACHE_DB}' -- a SEPARATE"
-    echo "    connection/pool from '${APP_DB}'; see references/cache.md."
+    echo "    connection/pool from '${MAIN_DB}'; see references/cache.md."
 else
-    echo "==> Done. Created/verified '${APP_DB}' and '${SYS_DB}' with ${NAMESPACE}_* roles."
+    echo "==> Done. Created/verified '${MAIN_DB}' and '${SYS_DB}' with ${NAMESPACE}_* roles."
 fi
 echo "    Attach logins with create-login.sh -n ${NAMESPACE} against this server."

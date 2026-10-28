@@ -70,14 +70,14 @@ your PATH (a standalone binary - `brew install dbmate`).
    docker compose up -d --build
    ```
    On the very first start, Postgres runs `backing/init-db.sql`, which creates both
-   databases - `orders_api` (the application DB) and `orders_api_dbos` (the DBOS system DB,
+   databases - `orders_api_main` (the application DB) and `orders_api_dbos` (the DBOS system DB,
    shared by the worker and the consumer) - plus the `crane` schema and its `search_path`. That
    script is a minimal local stand-in for provisioning; real environments use the
    `pg-role-provisioning` skill. Either way the services **fail if their database is
    missing** - provisioning is a prerequisite, not an app job.
 3. Apply the application-DB schema with dbmate (DBOS migrates its own system DB itself):
    ```bash
-   ./migrate.sh          # runs `dbmate up` against orders_api (see "Migrations" below)
+   ./migrate.sh          # runs `dbmate up` against orders_api_main (see "Migrations" below)
    ```
 
 > **If a cold `up` reports `dependency failed to start: container ... is unhealthy`,** run
@@ -159,7 +159,7 @@ projects don't collide on names as well as ports.
 `backing/init-db.sql` is mounted into `/docker-entrypoint-initdb.d/` and Postgres runs it
 **only on first init of an empty data volume**. Change it later, or point the stack at a volume
 that already has data, and it will not run again - you'll see
-`FATAL: database "orders_api" does not exist` from the app services. To start clean:
+`FATAL: database "orders_api_main" does not exist` from the app services. To start clean:
 
 ```bash
 docker compose down -v      # -v drops the volumes, including pgdata
@@ -171,7 +171,7 @@ If you'd rather keep the existing data, apply the missing pieces by hand instead
 
 ```bash
 docker compose exec postgres psql -U "$POSTGRES_USER" -d postgres \
-  -c 'CREATE DATABASE orders_api' -c 'CREATE DATABASE orders_api_dbos'
+  -c 'CREATE DATABASE orders_api_main' -c 'CREATE DATABASE orders_api_dbos'
 ```
 
 (The DBOS system database is the forgiving one - DBOS creates its own tables in it if missing.
@@ -219,9 +219,9 @@ service-name DNS:
 | Aspire OTLP | `aspire-dashboard:18889` | `localhost:18889` |
 
 Two databases live on the same Postgres host above - different databases, not different
-servers: the application DB (`orders_api`) and the DBOS system DB (`orders_api_dbos`), which the
+servers: the application DB (`orders_api_main`) and the DBOS system DB (`orders_api_dbos`), which the
 worker and the consumer share. The names follow the `pg-role-provisioning` convention
-(`<app>`, `<app>_cache`, `<app>_dbos`); this stack has no cache, so it uses two of the three.
+(`<app>_main`, `<app>_cache`, `<app>_dbos`); this stack has no cache, so it uses two of the three.
 See "Why one DBOS system database" below.
 
 Redpanda is the one that isn't symmetric. **In a container** it must be reached on-network at
@@ -478,7 +478,7 @@ run once rather than raced by three services on startup. Migrations live in `db/
 
 `migrate.sh` sources `.env`, points dbmate at `APP_DATABASE_URL` (normalizing the scheme and
 forcing `sslmode=disable` for local Postgres), and tracks applied migrations in a
-`schema_migrations` table in `orders_api`. It targets **only** the application DB - DBOS still
+`schema_migrations` table in `orders_api_main`. It targets **only** the application DB - DBOS still
 migrates its own system DB internally on `DBOS.launch()`. Run it after the databases are
 provisioned and before starting the services.
 
@@ -526,7 +526,7 @@ Flip `DEV_MODE=false` on the `api` service in `docker-compose.yml` and provide
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `minioadmin` / `minioadmin` (also Silo's root creds) | unset (use IAM role) |
 | `S3_FORCE_PATH_STYLE` | `true` | `false` |
 | `DBOS_DATABASE_URL` (worker + consumer + api) | `postgres:5432/orders_api_dbos` | your RDS/Aurora Postgres instance - the **same** database for all three |
-| `APP_DATABASE_URL` (consumer + api) | `postgres:5432/orders_api` | your RDS/Aurora Postgres instance |
+| `APP_DATABASE_URL` (consumer + api) | `postgres:5432/orders_api_main` | your RDS/Aurora Postgres instance |
 | `KAFKA_BOOTSTRAP_SERVERS` | `redpanda:9092` | your real Redpanda cluster's brokers |
 | `SMTP_HOST` / `SMTP_PORT` (worker) | `mailpit` / `1025` | SES SMTP endpoint (e.g. `email-smtp.us-east-1.amazonaws.com` / `587`) |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_USE_TLS` (worker) | unset / unset / `false` | SES SMTP credentials / `true` |

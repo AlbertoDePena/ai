@@ -12,7 +12,7 @@ Everything runs under a **master (admin) account** and is safe to re-run.
 
 | Script | Kind | What it does |
 | --- | --- | --- |
-| [`create-application-databases.sh`](#create-application-databasessh) | bash + psql | Creates an application database, its DBOS system database **and** its cache database, then applies the roles/grants to each. |
+| [`create-application-databases.sh`](#create-application-databasessh) | bash + psql | Creates an application database (`<app>_main`), its DBOS system database **and** its cache database, then applies the roles/grants to each. |
 | [`setup-database-roles.pgsql.sql`](#setup-database-rolespgsqlsql) | SQL | The role + grant logic for a **single** database. Applied by the script above; can also be run on its own. |
 | [`create-login.sh`](#create-loginsh) | bash + psql | Creates or updates **one** login role and attaches it to exactly one permission role. |
 | [`create-login.pgsql.sql`](#create-loginpgsqlsql) | SQL | The create-or-update-and-attach logic for a single login. Driven by the script above. |
@@ -149,12 +149,14 @@ Passwords are **prompted for (hidden)** by default so they never land in
 Creates three databases for an application and applies the role model to
 each:
 
-- `<app>` — the application database
+- `<app>_main` — the application database. Note the suffix: all three
+  db names derive from the `-a <app>` base and every one carries one,
+  so nothing is created under the bare `<app>`.
 - `<app>_cache` — its cache database: the full role/schema treatment
   plus an `UNLOGGED` `cache` table and `synchronous_commit = off`.
   Skip it with `-k`. See [`cache.md`](cache.md) for why the cache gets a
   database of its own (short version: `synchronous_commit` is a
-  per-database setting, and you do not want it off in `<app>`).
+  per-database setting, and you do not want it off in `<app>_main`).
 - `<app>_dbos` — its DBOS system database. Only the
   `<namespace>_application` role can reach it; DBOS keeps its tables in
   its own `dbos` schema, created later by `migrate-dbos-system.sh`.
@@ -183,7 +185,7 @@ namespace and schema name as psql variables.
 | Option | Required | Description |
 | --- | --- | --- |
 | `-c <conninfo>` | yes | Master connection string (password-less). |
-| `-a <app_name>` | yes | Application db name. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. The other two db names are derived from it: `<app_name>_cache` and `<app_name>_dbos`. |
+| `-a <app_name>` | yes | Application **base** name — not a db name on its own. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. All three db names derive from it: `<app_name>_main`, `<app_name>_cache` and `<app_name>_dbos`. |
 | `-n <namespace>` | yes | Root namespace for the four permission roles. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. |
 | `-s <schema>` | no | Application schema name. Default: same as `<namespace>`. Must match `^[A-Za-z_][A-Za-z0-9_]*$`. |
 | `-k` | no | Skip the `<app>_cache` database. Use it when the app has no cache or caches elsewhere; otherwise it's created even if unused, since an empty cache table costs nothing. |
@@ -196,7 +198,7 @@ namespace and schema name as psql variables.
   -c 'postgresql://admin@localhost:5432/postgres' \
   -a orders_api -n acme
 # prompts for the master password, then creates:
-#   orders_api, orders_api_cache  and  orders_api_dbos
+#   orders_api_main, orders_api_cache  and  orders_api_dbos
 # with permission roles acme_application, acme_application_readonly,
 # acme_developer, acme_developer_readonly granted on schema "acme",
 # and acme.cache (unlogged) in orders_api_cache
@@ -253,7 +255,7 @@ databases), and the two flags via `\set` per database:
 
 | Database | `create_app_schema` | `create_cache_table` |
 | --- | --- | --- |
-| `<app>` | `true` | `false` |
+| `<app>_main` | `true` | `false` |
 | `<app>_cache` | `true` | `true` |
 | `<app>_dbos` | `false` | `false` |
 
@@ -269,7 +271,7 @@ else.
 ```bash
 # Full treatment: roles + public lockdown + CONNECT + app schema/grants
 psql -v ON_ERROR_STOP=1 \
-  'postgresql://admin@localhost:5432/orders_api' \
+  'postgresql://admin@localhost:5432/orders_api_main' \
   -v role_prefix=acme \
   -v schema_name=acme \
   -f setup-database-roles.pgsql.sql
@@ -414,7 +416,8 @@ variable, keeping it out of `argv`.
 **Prerequisites**
 
 - The `<app>_dbos` database already exists (created by
-  `create-application-databases.sh -a <app>`).
+  `create-application-databases.sh -a <app>`, which derives it from the
+  `<app>` base alongside `<app>_main` and `<app>_cache`).
 - `dbosctl` on PATH — install with (no Go toolchain needed; downloads a
   checksummed, statically-linked binary for your platform):
   ```bash
@@ -483,7 +486,7 @@ export PATH="/opt/homebrew/opt/libpq/bin:$PATH"   # macOS/Homebrew psql
 CONN='postgresql://admin@localhost:5432/postgres'
 NS='acme'   # pick your namespace once, reuse it everywhere below
 
-# 1. Provision the application + cache + DBOS system databases
+# 1. Provision orders_api_main + orders_api_cache + orders_api_dbos
 #    (add -k to skip the cache db)
 ./create-application-databases.sh -c "$CONN" -a orders_api -n "$NS"
 
@@ -503,12 +506,12 @@ Because the DBOS system database also uses the namespace's permission
 roles, grant the application's DBOS login the `<namespace>_application`
 role (read/write) — DBOS needs write access to its system database. The
 same login created in step 3 therefore works for all three databases:
-`orders_api`, `orders_api_cache` and `orders_api_dbos`. There is
+`orders_api_main`, `orders_api_cache` and `orders_api_dbos`. There is
 no separate cache login to create.
 
 The cache database does, however, need its **own connection/pool** in
 the application — it is a different database, so nothing about it is
-reachable from an `orders_api` session. Point a second pool at
+reachable from an `orders_api_main` session. Point a second pool at
 `postgresql://<login>@host:5432/orders_api_cache` and read
 [`cache.md`](cache.md) before you depend on what it stores.
 
@@ -540,11 +543,15 @@ reachable from an `orders_api` session. Point a second pool at
   actually created.
 - **Dropping a database in use** requires terminating open sessions;
   on Postgres 13+ use `DROP DATABASE <name> WITH (FORCE)`.
-- **One application, three databases.** `<app>`, `<app>_cache` and
-  `<app>_dbos` all share the namespace's roles and schema name, so a
+- **One application, three databases.** `<app>_main`, `<app>_cache`
+  and `<app>_dbos` all share the namespace's roles and schema name, so a
   single login covers all three — but each is a separate connection, and
   nothing is transactional across them.
+- **Every db name carries a suffix.** The `-a` value is a base, not a
+  database: the application database is `<app>_main`. Nothing is
+  provisioned under the bare `<app>`, so a connection string left on it
+  fails to connect rather than quietly reaching an unprovisioned db.
 - **`<app>_dbos` must be configured, not inferred.** It is shorter than
-  the system-database name DBOS derives from the application database,
-  so an app that relies on that default will look for a database this
-  toolkit never created.
+  the system-database name DBOS derives from `<app>_main`, so an app
+  that relies on that default will look for a database this toolkit
+  never created.

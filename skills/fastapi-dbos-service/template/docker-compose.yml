@@ -34,9 +34,9 @@ services:
   # ---------------------------------------------------------------------------
 
   # PostgreSQL - holds both databases (see backing/init-db.sql):
-  # orders_api (the application DB) and orders_api_dbos (the DBOS system DB,
+  # orders_api_main (the application DB) and orders_api_dbos (the DBOS system DB,
   # shared by the worker and the consumer - one DBOS app, two processes).
-  # Names follow the pg-role-provisioning convention: <app>, <app>_dbos.
+  # Names follow the pg-role-provisioning convention: <app>_main, <app>_dbos.
   #   localhost:5432
   postgres:
     image: postgres:17-alpine
@@ -244,7 +244,7 @@ services:
       # the password must be percent-encoded. See .env.example.
       DBOS_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api_dbos
       # Read model the consumer populates; the API serves it at /processed-orders.
-      APP_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api
+      APP_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api_main
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
       OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire-dashboard:18889
       OTEL_SERVICE_NAME: order-api
@@ -329,7 +329,7 @@ services:
     environment:
       # The read model the consumer's workflow writes - a DIFFERENT database
       # from the DBOS system DB.
-      APP_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api
+      APP_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api_main
       # The SAME system database as the worker and the api: the consumer is not
       # a separate DBOS app, it is a second process of this one. Both register
       # every workflow so either can execute whatever it dequeues or recovers -
