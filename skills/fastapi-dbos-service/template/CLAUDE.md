@@ -65,9 +65,9 @@ to real S3 is an env change (`S3_ENDPOINT_URL` unset,
 ## Databases
 
 Two SEPARATE Postgres databases (same server, different databases), named the
-way the `pg-role-provisioning` skill provisions them - `<app>`, `<app>_cache`,
-`<app>_dbos`, of which this stack uses two:
-- **Application DB** (`APP_DATABASE_URL`, `orders_api`) - our read model.
+way the `pg-role-provisioning` skill provisions them - `<app>_main`,
+`<app>_cache`, `<app>_dbos`, of which this stack uses two:
+- **Application DB** (`APP_DATABASE_URL`, `orders_api_main`) - our read model.
 - **DBOS system DB** (`DBOS_DATABASE_URL`, `orders_api_dbos`) - SHARED by the
   worker and the consumer. DBOS owns it and migrates it itself on
   `DBOS.launch()`. Don't touch its schema.
@@ -174,14 +174,15 @@ Python 3.12 (matches the container); PEP 604 `X | None` syntax is used.
 ## Namespace knobs (when templating this)
 
 Change these together to re-theme the demo: the compose project `name:`, DB
-names (`orders_api`, `orders_api_dbos`), the `crane` schema +
+names (`orders_api_main`, `orders_api_dbos`), the `crane` schema +
 search_path (in `.env`, `backing/init-db.sql`), the bucket name (in `constants.py` AND the
 `createbuckets` entrypoint in `docker-compose.yml`), OTel service names
 (`order-api`/`order-worker`/`order-consumer`), the Kafka topic (`order-events`),
 consumer group (`order-events-consumer`), DBOS queue (`orders_queue`) and the
 app name (`APP_NAME`) in `constants.py`, and the S3 bucket (`orders-bucket`).
 
-Renaming the app database means renaming `<app>_dbos` with it - the two are a
-set. Note `<app>_dbos` is shorter than the system-database name DBOS derives on
-its own, which is why `DBOS_DATABASE_URL` is always set explicitly rather than
-left to a default.
+Renaming the app database means renaming `<app>_dbos` with it - `<app>_main`
+and `<app>_dbos` are a set derived from one `<app>` base. Note `<app>_dbos` is
+shorter than the system-database name DBOS derives from `<app>_main` on its
+own, which is why `DBOS_DATABASE_URL` is always set explicitly rather than left
+to a default.

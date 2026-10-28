@@ -10,11 +10,12 @@
 -- CURRENT_USER rather than a hardcoded role name, so this stays correct if
 -- POSTGRES_USER changes in .env. (initdb runs this as POSTGRES_USER.)
 
--- Naming follows the pg-role-provisioning skill: <app>, <app>_cache and
--- <app>_dbos. This stack uses two of the three - there is no cache here.
+-- Naming follows the pg-role-provisioning skill: <app>_main, <app>_cache
+-- and <app>_dbos - every name derived from the <app> base carries a
+-- suffix. This stack uses two of the three - there is no cache here.
 
 -- The application database - our own tables (the read model).
-CREATE DATABASE orders_api;
+CREATE DATABASE orders_api_main;
 
 -- ONE DBOS system database, shared by the worker and the consumer. They are one
 -- DBOS app running as two processes (same APP_NAME, same application_version),
@@ -24,10 +25,10 @@ CREATE DATABASE orders_api;
 -- tables in here on launch.
 CREATE DATABASE orders_api_dbos;
 
-\connect orders_api
+\connect orders_api_main
 CREATE SCHEMA IF NOT EXISTS crane AUTHORIZATION CURRENT_USER;
 
 -- Unqualified table names (in the app and in dbmate migrations) resolve to the
 -- namespace schema through this search_path. Change `crane` here together with
 -- the schema above to rename the namespace.
-ALTER ROLE CURRENT_USER IN DATABASE orders_api SET search_path = crane, public;
+ALTER ROLE CURRENT_USER IN DATABASE orders_api_main SET search_path = crane, public;

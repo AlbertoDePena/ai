@@ -3,7 +3,7 @@ The application Postgres database - SEPARATE from the DBOS system database.
 
 The worker and the consumer share one system database for their workflow/queue
 state (DBOS_DATABASE_URL -> orders_api_dbos);
-this module talks to the other database (APP_DATABASE_URL -> orders_api), holding the
+this module talks to the other database (APP_DATABASE_URL -> orders_api_main), holding the
 application's own data: a read model of `order.processed` events in a
 `processed_orders` table (its schema is decided by the role's search_path, set
 by provisioning). Keeping them apart means app schema changes never touch

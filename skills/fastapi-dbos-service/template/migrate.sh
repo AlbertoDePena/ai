@@ -8,7 +8,7 @@
 #   ./migrate.sh down         # roll back the most recent migration
 #   ./migrate.sh new <name>   # scaffold a new migration file under db/migrations
 #
-# Scope: this manages the APPLICATION database (orders_api, `crane` schema) via
+# Scope: this manages the APPLICATION database (orders_api_main, `crane` schema) via
 # APP_DATABASE_URL. DBOS manages its own system database separately, on
 # DBOS.launch() - dbmate does not touch it.
 

@@ -1,7 +1,7 @@
 # The `<app>_cache` database
 
 `create-application-databases.sh` provisions a third database next to
-`<app>` and `<app>_dbos`, named:
+`<app>_main` and `<app>_dbos`, named:
 
 ```
 <app>_cache
@@ -25,8 +25,9 @@ neither can be scoped to a table:
 | `synchronous_commit = off` | per **database** / role / transaction | Commits don't wait for an fsync. |
 
 `synchronous_commit` has no table-level setting. Turning it off for a
-cache table that lives in `<app>` would turn it off for every order,
-payment and audit row in `<app>` too. A dedicated database is what
+cache table that lives in `<app>_main` would turn it off for every
+order, payment and audit row in `<app>_main` too. A dedicated database is
+what
 confines "the last few hundred milliseconds of writes can vanish on a
 crash" to data that is disposable by definition.
 
@@ -199,7 +200,7 @@ small — tens of MB. Measure before switching; don't guess.
 
 **Invalidation is best-effort.** The cache is a different database, so a
 cache write cannot be in the same transaction as the application write
-it reflects. A commit to `<app>` followed by a failed `DELETE` on
+it reflects. A commit to `<app>_main` followed by a failed `DELETE` on
 `<app>_cache` leaves a stale entry. Prefer short TTLs as the backstop
 and treat explicit invalidation as an optimisation, not a guarantee.
 

@@ -51,14 +51,15 @@ Ask the user for these (offer the demo defaults):
 |---|---|---|
 | **entity** | `order` | the domain noun: identifiers, topic/queue/bucket/table names, OTel service names, the request model, routes |
 | **namespace** | `crane` | the Postgres schema + role prefix (hand this to `pg-role-provisioning`); the role's `search_path` resolves unqualified table names |
-| **app DB name** | `orders_api` | `APP_DATABASE_URL` database |
+| **app DB name** | `orders_api_main` | `APP_DATABASE_URL` database |
 | **DBOS DB name** | `orders_api_dbos` | `DBOS_DATABASE_URL` database, shared by worker + consumer + api |
 
-Database names follow the `pg-role-provisioning` convention - `<app>`,
-`<app>_cache`, `<app>_dbos` - so `<app>_dbos` tracks whatever the app DB is
-named. This stack has no cache, so it uses two of the three. `<app>_dbos` is
-shorter than the name DBOS derives from the app database on its own, which is
-why `DBOS_DATABASE_URL` is always set explicitly rather than left to a default.
+Database names follow the `pg-role-provisioning` convention - `<app>_main`,
+`<app>_cache`, `<app>_dbos` - all three derived from the `<app>` base, so every
+db name carries a suffix and nothing sits on the bare `<app>`. This stack has
+no cache, so it uses two of the three. `<app>_dbos` is shorter than the name
+DBOS derives from `<app>_main` on its own, which is why `DBOS_DATABASE_URL` is
+always set explicitly rather than left to a default.
 
 ## Steps
 
@@ -100,8 +101,9 @@ why `DBOS_DATABASE_URL` is always set explicitly rather than left to a default.
 
 4. **Provision the databases.** Use the **pg-role-provisioning** skill with the
    same namespace to create the roles, the databases, the schema, and the
-   `search_path`. That skill provisions `<app>`, `<app>_cache` and `<app>_dbos`;
-   this stack uses `<app>` and `<app>_dbos` and leaves the cache database
+   `search_path`. That skill provisions `<app>_main`, `<app>_cache` and
+   `<app>_dbos`; this stack uses `<app>_main` and `<app>_dbos` and leaves the
+   cache database
    unused (pass `-k` to skip creating it). Point `DBOS_DATABASE_URL` at
    `<app>_dbos` explicitly - it is shorter than the name DBOS would derive on
    its own. (`backing/init-db.sql` is only a minimal local stand-in for the

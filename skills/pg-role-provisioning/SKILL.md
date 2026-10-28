@@ -1,6 +1,6 @@
 ---
 name: pg-role-provisioning
-description: Provision PostgreSQL application databases (app + DBOS system + an unlogged key/value cache db), a four-tier permission-role model (read/write and read-only roles for both applications and developers), login roles, and DBOS system-database migrations — all built on a namespace the caller supplies (no hard-coded role prefix or schema name). Use this skill whenever the user wants to set up new application/DBOS/cache databases, create or rotate PostgreSQL login roles tied to a permission-role model, cache key/value data in PostgreSQL instead of Redis, or wants a role-prefix/schema naming convention parameterized around their own namespace (e.g. "acme", "orders", their company name). Trigger on requests like "set up a new database for my app with roles", "create a postgres login for this service", "migrate the DBOS system database", "add a Postgres-backed cache to my service", or "give me a role-based Postgres provisioning setup with my own namespace".
+description: Provision PostgreSQL application databases (<app>_main + DBOS system + an unlogged key/value cache db), a four-tier permission-role model (read/write and read-only roles for both applications and developers), login roles, and DBOS system-database migrations — all built on a namespace the caller supplies (no hard-coded role prefix or schema name). Use this skill whenever the user wants to set up new application/DBOS/cache databases, create or rotate PostgreSQL login roles tied to a permission-role model, cache key/value data in PostgreSQL instead of Redis, or wants a role-prefix/schema naming convention parameterized around their own namespace (e.g. "acme", "orders", their company name). Trigger on requests like "set up a new database for my app with roles", "create a postgres login for this service", "migrate the DBOS system database", "add a Postgres-backed cache to my service", or "give me a role-based Postgres provisioning setup with my own namespace".
 ---
 
 # PostgreSQL role-based provisioning
@@ -12,12 +12,14 @@ permission model**: `<namespace>_application`,
 `<namespace>_developer_readonly`, all granted on a dedicated application
 schema (default: same name as `<namespace>`) instead of `public`.
 
-Each application gets **three databases** — `<app>`, `<app>_cache`
-and `<app>_dbos` — all sharing the same namespace roles and schema
-name. The cache database holds an `UNLOGGED`
+Each application gets **three databases** — `<app>_main`,
+`<app>_cache` and `<app>_dbos` — all sharing the same namespace roles
+and schema name. All three names derive from the `-a <app>` base, and
+every one carries a suffix: the application database is `<app>_main`,
+**not** the bare `<app>`. The cache database holds an `UNLOGGED`
 `cache(key, value, expires_at)` table and runs with
 `synchronous_commit = off`; it is a separate database because that
-setting is per-database and must not apply to `<app>`.
+setting is per-database and must not apply to `<app>_main`.
 
 `<app>_dbos` is deliberately **shorter** than the name DBOS derives from
 the application database on its own, so an application must be pointed
@@ -52,7 +54,7 @@ covers the mechanics of using the bundled scripts.
 
 ```
 scripts/
-  create-application-databases.sh   # create <app> + <app>_cache + <app>_dbos dbs, apply roles to all
+  create-application-databases.sh   # create <app>_main + <app>_cache + <app>_dbos dbs, apply roles to all
   setup-database-roles.pgsql.sql    # role/grant logic for ONE database (invoked by the script above)
   create-login.sh                   # create/update one login, attach to one permission role
   create-login.pgsql.sql            # SQL behind create-login.sh
@@ -78,8 +80,8 @@ automatically:
 CONN='postgresql://admin@localhost:5432/postgres'   # master conninfo, no password
 NS='acme'   # the user's chosen namespace — required, no default
 
-# 1. Create the app db + cache db + DBOS system db, apply the role model
-#    to all three (add -k to skip the cache db)
+# 1. Create orders_api_main + orders_api_cache + orders_api_dbos, apply
+#    the role model to all three (add -k to skip the cache db)
 ./create-application-databases.sh -c "$CONN" -a orders_api -n "$NS"
 
 # 2. Migrate the DBOS system database
@@ -97,6 +99,10 @@ NS='acme'   # the user's chosen namespace — required, no default
 One login covers all three databases — they share the namespace's
 roles — but each is a separate connection, so the app needs a second
 pool pointed at `<app>_cache`. Nothing is transactional across them.
+
+Point the application at `<app>_main` explicitly. Nothing is created
+under the bare `<app>`, so a connection string left on it fails to
+connect rather than silently landing somewhere unprovisioned.
 
 Passwords are always prompted (hidden) unless `PGPASSWORD` /
 `LOGIN_PASSWORD` are set in the environment — never pass them on the
@@ -151,7 +157,7 @@ rather than assuming a single script run handles a rename.
 
 `setup-database-roles.pgsql.sql` takes an optional `create_app_schema`
 psql variable (`true`/`false`, default `true`). `create-application-databases.sh`
-sets it to `true` for the app db and `false` for the `<app>_dbos`
+sets it to `true` for `<app>_main` and `false` for the `<app>_dbos`
 db, via `\set create_app_schema ...` before each `\i` call — the same
 `schema_name` value is passed once, up front, for both databases; the
 flag just controls whether that run actually creates the schema.
@@ -166,7 +172,7 @@ schema instead.
 
 The flag also decides **which roles get `CONNECT`**:
 
-- `true` (app db) — all four tiers.
+- `true` (`<app>_main`, `<app>_cache`) — all four tiers.
 - `false` (DBOS system db) — only `<namespace>_application`, and the
   other three are explicitly *revoked* so re-running tightens a system
   db provisioned by an earlier version. `dbosctl sysdb migrate
@@ -214,8 +220,8 @@ The points most likely to come up:
 
 - **Why its own database.** `UNLOGGED` is per-table but
   `synchronous_commit` is per-**database**; there is no table-level
-  setting. A cache table in `<app>` would mean relaxing durability for
-  every row in `<app>`. Don't "simplify" the cache back into the
+  setting. A cache table in `<app>_main` would mean relaxing durability
+  for every row in `<app>_main`. Don't "simplify" the cache back into the
   application database, and don't set `create_cache_table=true` against
   any database holding data you'd mind losing.
 - **The two settings aren't redundant.** An unlogged table writes no WAL
