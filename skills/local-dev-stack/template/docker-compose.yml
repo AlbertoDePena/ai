@@ -1,0 +1,176 @@
+# Local development stack for ${APP_NAME}.
+#
+# One stack per repo: every host port and the container-name prefix come from
+# .env, so two repos' stacks can run at the same time. Volumes are namespaced
+# automatically by COMPOSE_PROJECT_NAME, so nothing is shared between repos.
+#
+#   docker-compose up -d        # start
+#   docker-compose down         # stop (keeps data)
+#   docker-compose down -v      # stop and delete the data volumes
+services:
+  # Aspire dashboard — local OTLP endpoint for traces/logs/metrics.
+  #   UI:   http://localhost:${ASPIRE_UI_PORT}
+  #   OTLP: http://localhost:${ASPIRE_OTLP_PORT}
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:latest
+    container_name: ${APP_NAME}_aspire
+    restart: unless-stopped
+    environment:
+      DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS: "true"
+    ports:
+      - "${ASPIRE_UI_PORT}:18888"
+      - "${ASPIRE_OTLP_PORT}:18889"
+
+  # Silo — S3-compatible object storage for local dev/testing.
+  #   API:     http://localhost:${S3_PORT}
+  #   Console: http://localhost:${S3_CONSOLE_PORT}
+  #
+  # Silo is a community fork of the open-source MinIO server, maintained by the
+  # Pigsty project. Its rule is "the product is renamed, the protocol and your
+  # data are not" — the S3 API, the MINIO_* env vars, the command line, and the
+  # on-disk format are all unchanged.
+  #
+  # WHY NOT MinIO, AND WHY NOT LOCALSTACK
+  #
+  # MinIO: its public images are gone. `minio/minio` and `minio/mc` both 404 on
+  # Docker Hub (the Hub API answers {"message":"object not found"}) and
+  # quay.io/minio/* requires auth. A stack pinned to those images only keeps
+  # working on a machine that still has the old image cached — a fresh machine
+  # cannot pull it, and neither can a teammate.
+  #
+  # LocalStack: tried and rejected. Its current images exit with code 55 and
+  # "License activation failed! ... set the LOCALSTACK_AUTH_TOKEN variable" —
+  # the last line that runs free is 4.9. And its community-edition S3 is held
+  # IN MEMORY: every bucket and object disappears on container restart
+  # (persistence is a paid feature), with no web console to inspect blobs.
+  #
+  # Silo runs free (AGPLv3, no token), persists blobs on the volume below,
+  # keeps MinIO's web console, and ships `mc` in the image.
+  silo:
+    # Pinned to a dated release, not :latest. Object-storage tags have already
+    # moved twice (MinIO withdrawn, LocalStack licence-gated) and this fork is
+    # young, so a floating tag is the same bet a third time. Use the plain tag,
+    # not -distroless — that variant has no `mc` or `sh`.
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    container_name: ${APP_NAME}_s3
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      # Silo keeps MinIO's variable names. It does validate their length:
+      # user >= 3, password >= 8 characters.
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${S3_PORT}:9000"
+      - "${S3_CONSOLE_PORT}:9001"
+    volumes:
+      # Named `miniodata`: Silo reads MinIO's on-disk format as-is, so an
+      # existing MinIO volume carries over untouched.
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: creates the app's bucket, then exits. `docker-compose up -d`
+  # reports it as "exited (0)" — that is success, not a failure.
+  silo-setup:
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    container_name: ${APP_NAME}_s3_setup
+    depends_on:
+      silo:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+      mc alias set local http://silo:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/${S3_BUCKET} &&
+      echo 'bucket ${S3_BUCKET} ready'
+      "
+
+  # PostgreSQL — local relational database for development/testing.
+  #   Connection: postgres://${POSTGRES_USER}@localhost:${POSTGRES_PORT}/${POSTGRES_DB}
+  postgres:
+    image: postgres:17-alpine
+    container_name: ${APP_NAME}_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs *.sql / *.sh in this directory on a fresh volume only. Delete this
+      # mount if the repo has no backing/ directory.
+      - ./backing:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Mailpit — local SMTP server with web UI for testing emails.
+  #   Web UI: http://localhost:${MAILPIT_UI_PORT}
+  #   SMTP:   localhost:${MAILPIT_SMTP_PORT}
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: ${APP_NAME}_mailpit
+    restart: unless-stopped
+    environment:
+      MP_MAX_MESSAGES: 5000
+      MP_DATABASE: /data/mailpit.db
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "${MAILPIT_UI_PORT}:8025"
+      - "${MAILPIT_SMTP_PORT}:1025"
+    volumes:
+      - mailpitdata:/data
+
+  # Redpanda — local Kafka-compatible streaming platform for development/testing.
+  #   From the host:       localhost:${KAFKA_PORT}
+  #   From another service: redpanda:9092
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: ${APP_NAME}_redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:${KAFKA_PORT}
+      - --mode=dev-container
+    ports:
+      - "${KAFKA_PORT}:19092"
+    volumes:
+      - redpandadata:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Redpanda Console — web UI for managing Redpanda clusters.
+  #   Web UI: http://localhost:${KAFKA_CONSOLE_PORT}
+  redpanda-console:
+    image: redpandadata/console:latest
+    container_name: ${APP_NAME}_redpanda_console
+    restart: unless-stopped
+    depends_on:
+      - redpanda
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "${KAFKA_CONSOLE_PORT}:8080"
+
+volumes:
+  miniodata:
+  pgdata:
+  mailpitdata:
+  redpandadata:
