@@ -110,7 +110,7 @@ image), never the app at startup.
 
 - **One compose file, one project**: `docker-compose.yml` holds the three app
   services AND the backing services (Postgres, Silo, Redpanda + Console,
-  Mailpit, Aspire). No external network, no second compose file. Backing
+  Mailpit, otel-lgtm). No external network, no second compose file. Backing
   services get `restart: unless-stopped`; app services get neither that nor a
   `container_name` (fail-fast visibility, and `--scale worker=3` must work).
 - All env comes from `.env` (gitignored; copy `.env.example`). Compose

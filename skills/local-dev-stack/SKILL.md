@@ -1,6 +1,6 @@
 ---
 name: local-dev-stack
-description: Scaffold this repo's own local development stack as a docker-compose project — Postgres 17, Silo (S3-compatible object storage, the maintained MinIO fork), Redpanda + Console (Kafka), Mailpit (SMTP + web UI), and the Aspire dashboard (OTLP traces/logs/metrics) — with every host port and container name parameterized through .env so each repo's stack runs independently and side by side. Use whenever the user starts a new project or repo and wants local backing services, says "set up docker compose", "add the dev stack", "I need Postgres and Kafka locally", "spin up the local containers", "add S3/MinIO locally", "add a local SMTP server", "scaffold docker for this repo", or asks to add one of those services to an existing docker-compose.yml. Also use to re-point an existing stack onto a free port lane when two repos collide. Do NOT use for production/deployment compose files or for Dockerfiles that build the app itself.
+description: Scaffold this repo's own local development stack as a docker-compose project — Postgres 17, Silo (S3-compatible object storage, the maintained MinIO fork), Redpanda + Console (Kafka), Mailpit (SMTP + web UI), and otel-lgtm (Grafana + Loki + Tempo + Prometheus for OTLP traces/logs/metrics) — with every host port and container name parameterized through .env so each repo's stack runs independently and side by side. Use whenever the user starts a new project or repo and wants local backing services, says "set up docker compose", "add the dev stack", "I need Postgres and Kafka locally", "spin up the local containers", "add S3/MinIO locally", "add a local SMTP server", "add Grafana/OTel locally", "scaffold docker for this repo", or asks to add one of those services to an existing docker-compose.yml. Also use to re-point an existing stack onto a free port lane when two repos collide. Do NOT use for production/deployment compose files or for Dockerfiles that build the app itself.
 ---
 
 # Local dev stack scaffold
@@ -21,7 +21,7 @@ Substitution below for which to replace and which to leave alone.
 | `silo` + `silo-setup` | S3-compatible storage + one-shot bucket creator | 9000 API, 9001 console |
 | `redpanda` + `redpanda-console` | Kafka-compatible broker + web UI | 19092, 8080 |
 | `mailpit` | SMTP sink with web UI | 1025 SMTP, 8025 UI |
-| `aspire-dashboard` | OTLP collector + trace/log/metric UI | 18888 UI, 18889 OTLP |
+| `otel` | otel-lgtm: OTLP endpoint + Grafana/Loki/Tempo/Prometheus, persisted | 3000 Grafana, 4317 OTLP gRPC, 4318 OTLP HTTP |
 
 Postgres, Silo and Redpanda have healthchecks, so app services added later can
 use `depends_on: { condition: service_healthy }`.
@@ -46,9 +46,11 @@ use `depends_on: { condition: service_healthy }`.
 4. **Pick a port lane.** Run `docker ps --format '{{.Names}}\t{{.Ports}}'` and
    check the defaults. If another stack already holds them, shift this repo to
    a free lane (`+100` per lane: Postgres 5532, S3 9100/9101, Mailpit
-   8125/1125, Kafka 19192/8180, Aspire 18988/18989) and say which lane you
-   chose. Lane assignment lives only in `.env` — the compose file never
-   hard-codes a host port.
+   8125/1125, Kafka 19192/8180, otel-lgtm 3100/4417/4418) and say which lane
+   you chose. Grafana's 3000 collides more often than the rest — a Node or Vite
+   dev server holds it just as happily — so check that one even when the stack
+   is the only one running. Lane assignment lives only in `.env` — the compose
+   file never hard-codes a host port.
 
 5. **Write the files** into `<repo>/docker/`: `docker-compose.yml`,
    `.env.example`, `README.md`, and a `.env` copied from `.env.example` with the
@@ -93,11 +95,21 @@ are documentation, not interpolation, so substitute the real values there.
 - **Silo stays pinned** to a dated release. Object-storage tags have moved twice
   already; `:latest` is the same bet a third time. Use the plain tag, not
   `-distroless` (no `mc`, no `sh`).
+- **otel-lgtm, not the Aspire dashboard.** The Aspire dashboard is lighter, but
+  it only displays telemetry: a bounded in-memory buffer, no query language, no
+  dashboards, nothing kept across a restart. `grafana/otel-lgtm` is one container
+  carrying Grafana, Loki, Tempo, Prometheus and Pyroscope with the datasources
+  pre-wired, persists to a volume, and answers PromQL/LogQL/TraceQL. The single
+  `/data` mount covers all five backends.
+- **Both OTLP ports are published** because SDKs disagree on transport: .NET and
+  Go default to gRPC (4317), while Pydantic Logfire and the DBOS Python SDK
+  export OTLP/HTTP only (4318) with no protocol switch. Apps that use those need
+  `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` and the 4318 endpoint.
 - **Volumes are namespaced** by `COMPOSE_PROJECT_NAME`, so two repos never share
   data even though both declare a `pgdata` volume.
 - **Container-to-container addresses** are service names on the compose network
-  (`postgres:5432`, `silo:9000`, `redpanda:9092`); the `.env` host ports apply
-  only to processes outside Docker. Redpanda's `--advertise-kafka-addr` carries
+  (`postgres:5432`, `silo:9000`, `redpanda:9092`, `otel:4317`); the `.env` host
+  ports apply only to processes outside Docker. Redpanda's `--advertise-kafka-addr` carries
   both.
 - **Adding the app itself** to this compose file is fine (same project, one
   network). Give it `depends_on` with `service_healthy` on what it needs, and

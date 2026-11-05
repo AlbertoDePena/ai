@@ -19,7 +19,7 @@ cd "$(dirname "$0")"
 
 # The backing services in docker-compose.yml, i.e. everything except the three
 # app services. `./run-local.sh infra` brings up exactly these.
-INFRA_SERVICES=(postgres silo createbuckets redpanda redpanda-console mailpit aspire-dashboard)
+INFRA_SERVICES=(postgres silo createbuckets redpanda redpanda-console mailpit otel)
 
 if [[ ! -f .env ]]; then
   echo "error: .env not found - copy the template: cp .env.example .env" >&2

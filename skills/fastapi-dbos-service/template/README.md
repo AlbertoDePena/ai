@@ -10,7 +10,7 @@ A small order-processing service built from:
 | **Redpanda** | Kafka-wire-compatible broker; an `order.processed` business event is published after each order finishes |
 | **Consumer** (`consumer.py`) | DBOS Kafka consumer: `@DBOS.kafka_consumer` starts one durable workflow per `order.processed` event, which projects it into Postgres and notifies a downstream REST API |
 | **Mailpit** | Local SMTP sink; the worker sends an order-confirmation email per order (swap for SES SMTP in prod) |
-| **Aspire Dashboard** | Collects OTel traces/metrics/logs from all three services |
+| **otel-lgtm** | Grafana + Loki + Tempo + Prometheus in one container; collects OTel traces/metrics/logs from all three services and keeps them across restarts |
 
 Three long-running services, all the same shape (uvicorn + FastAPI + lifespan + `/health`):
 `api` (HTTP), `worker` (DBOS queue), and `consumer` (Kafka). The last two are the two worker
@@ -37,16 +37,16 @@ FastAPI (api)                         Worker (worker.py)
                                              ^
          API reads this read model ---------'  (GET /processed-orders, async psycopg)
 
-All three processes export OTel traces/metrics/logs -> Aspire Dashboard
+All three processes export OTel traces/metrics/logs -> otel-lgtm (Tempo/Loki/Prometheus)
 ```
 
 ## Run it
 
 **One compose project holds everything** - the three app processes (`api`, `worker`,
 `consumer`) and the backing services they need (Postgres, Silo for S3, Redpanda + Console,
-Mailpit, Aspire Dashboard). They share the project's default network, so the app services
+Mailpit, otel-lgtm). They share the project's default network, so the app services
 address the backing ones by service name (`postgres`, `silo:9000`, `redpanda:9092`, `mailpit`,
-`aspire-dashboard`) with no external network to create first.
+`otel:4317`) with no external network to create first.
 
 **Prerequisites:** Docker, and [dbmate](https://github.com/amacneil/dbmate#installation) on
 your PATH (a standalone binary - `brew install dbmate`).
@@ -103,7 +103,8 @@ your PATH (a standalone binary - `brew install dbmate`).
 - **API**: http://localhost:8000/dashboard (health at http://localhost:8000/health)
 - **Worker health**: http://localhost:8001/health
 - **Consumer health**: http://localhost:8002/health
-- **Aspire Dashboard** (traces/metrics/logs): http://localhost:18888
+- **Grafana** (traces/metrics/logs, via otel-lgtm): http://localhost:3000 - no login; traces
+  are in Tempo, logs in Loki, metrics in Prometheus, all pre-wired as datasources
 - **Silo console** (browse the bucket): http://localhost:9001 - sign in with the
   `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` from `.env`
 - **Redpanda Console**: http://localhost:8080 (inspect the `order-events` topic to watch messages land)
@@ -112,8 +113,10 @@ your PATH (a standalone binary - `brew install dbmate`).
 Submit an order from the dashboard. It goes `queued -> processing -> done` over ~8s, then the
 `order.processed` event lands in Redpanda and the consumer's own DBOS workflow projects it into
 `processed_orders` (visible at `GET /processed-orders`).
-In the Aspire Dashboard's **Traces** tab you'll see the `POST /orders` request as one trace,
+In Grafana, **Explore -> Tempo -> Search** shows the `POST /orders` request as one trace,
 the worker's DBOS workflow as a **separate** trace, and the consumer's workflow as a third.
+(Filter by `service.name` - `order-api`, `order-worker`, `order-consumer` - to tell them
+apart.)
 
 > **Note on trace continuity:** DBOS 1.14 does not carry OTel trace context across an
 > enqueue. `EnqueueOptions` has no `otel_context` field, the enqueue path ignores any extra
@@ -126,7 +129,8 @@ the worker's DBOS workflow as a **separate** trace, and the consumer's workflow 
 ### Running alongside another stack
 
 Because the stack ships inside the project, it claims the standard host ports (5432, 9000,
-9001, 8080, 1025, 8025, 18888, 18889, 8000-8002). If you already run another stack on them -
+9001, 8080, 1025, 8025, 3000, 4317, 4318, 8000-8002). If you already run another stack on
+them -
 a shared one, or a second project scaffolded from this template - you'll get
 `Bind for 0.0.0.0:5432 failed: port is already allocated`. Two ways out:
 
@@ -216,7 +220,8 @@ service-name DNS:
 | Postgres | `postgres:5432` | `localhost:5432` |
 | S3 (Silo) | `silo:9000` | `localhost:9000` |
 | Redpanda | `redpanda:9092` | `localhost:19092` |
-| Aspire OTLP | `aspire-dashboard:18889` | `localhost:18889` |
+| OTLP gRPC (otel-lgtm) | `otel:4317` | `localhost:4317` |
+| Grafana UI | `otel:3000` | `localhost:3000` |
 
 Two databases live on the same Postgres host above - different databases, not different
 servers: the application DB (`orders_api_main`) and the DBOS system DB (`orders_api_dbos`), which the
@@ -531,6 +536,6 @@ Flip `DEV_MODE=false` on the `api` service in `docker-compose.yml` and provide
 | `SMTP_HOST` / `SMTP_PORT` (worker) | `mailpit` / `1025` | SES SMTP endpoint (e.g. `email-smtp.us-east-1.amazonaws.com` / `587`) |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_USE_TLS` (worker) | unset / unset / `false` | SES SMTP credentials / `true` |
 | `EXTERNAL_API_URL` / `EXTERNAL_API_TOKEN` (consumer) | unset (step skipped) | your downstream REST API + its token |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://aspire-dashboard:18889` | your ADOT sidecar or collector |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel:4317` | your ADOT sidecar or collector |
 
 Each of `api`, `worker`, and `consumer` maps to its own ECS task definition/service.

@@ -7,7 +7,7 @@
 #
 # Everything shares this project's default network, so the app services reach
 # the backing ones by service name (postgres, redpanda, silo, mailpit,
-# aspire-dashboard) with no external network to create first.
+# otel) with no external network to create first.
 #
 # The stack is self-contained, so it claims the standard host ports (5432, 9000,
 # 8080, ...). If you already run another stack on them - a shared one, or a
@@ -203,17 +203,29 @@ services:
     volumes:
       - mailpitdata:/data
 
-  # Aspire dashboard - local OTLP endpoint for traces/logs/metrics.
-  #   UI:   http://localhost:18888
-  #   OTLP: http://localhost:18889
-  aspire-dashboard:
-    image: mcr.microsoft.com/dotnet/aspire-dashboard:latest
+  # otel-lgtm - Grafana + Loki + Tempo + Prometheus + Pyroscope in one
+  # container, with the datasources pre-wired. The local OTLP endpoint for
+  # traces/logs/metrics from all three app services.
+  #   Grafana:   http://localhost:3000   (anonymous admin, no login)
+  #   OTLP gRPC: localhost:4317          (what otel_setup.py uses)
+  #   OTLP HTTP: localhost:4318
+  #
+  # Replaces the .NET Aspire dashboard this template used to ship. Aspire is
+  # lighter, but it only displays telemetry: a bounded in-memory buffer, no
+  # query language, no dashboards, nothing kept across a restart. otel-lgtm
+  # persists to the volume below, so a trace from this morning is still
+  # queryable this afternoon, and PromQL/LogQL/TraceQL all work against it.
+  otel:
+    image: grafana/otel-lgtm:latest
     restart: unless-stopped
-    environment:
-      DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS: "true"
     ports:
-      - "18888:18888"
-      - "18889:18889"
+      - "3000:3000"
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      # One mount covers all five backends: /data holds grafana/, prometheus/,
+      # loki/, tempo/ and pyroscope/.
+      - lgtmdata:/data
 
   # ---------------------------------------------------------------------------
   # App services. No container_name here either - it would also break
@@ -246,7 +258,7 @@ services:
       # Read model the consumer populates; the API serves it at /processed-orders.
       APP_DATABASE_URL: postgresql://${POSTGRES_USER:?set it in .env}:${POSTGRES_PASSWORD_URLENC:?set it in .env}@postgres:5432/orders_api_main
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire-dashboard:18889
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel:4317
       OTEL_SERVICE_NAME: order-api
       ENVIRONMENT: local
       # Real Azure AD auth: set DEV_MODE=false above, uncomment these, and put
@@ -295,7 +307,7 @@ services:
       # SMTP_USERNAME: ...
       # SMTP_PASSWORD: ...
       # SMTP_USE_TLS: "true"
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire-dashboard:18889
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel:4317
       OTEL_SERVICE_NAME: order-worker
       ENVIRONMENT: local
     depends_on:
@@ -340,7 +352,7 @@ services:
       # which is the default since this stack has no such service.
       EXTERNAL_API_URL: ${EXTERNAL_API_URL:-}
       EXTERNAL_API_TOKEN: ${EXTERNAL_API_TOKEN:-}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire-dashboard:18889
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel:4317
       OTEL_SERVICE_NAME: order-consumer
       ENVIRONMENT: local
     depends_on:
@@ -363,3 +375,4 @@ volumes:
   silodata:
   mailpitdata:
   redpandadata:
+  lgtmdata:

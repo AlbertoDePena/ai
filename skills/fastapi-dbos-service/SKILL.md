@@ -1,6 +1,6 @@
 ---
 name: fastapi-dbos-service
-description: Scaffold a new Python service from an opinionated FastAPI + DBOS + Kafka + Postgres + S3 + OTel template. Produces three deployable services that share one shape (uvicorn + FastAPI + lifespan + /health) - an HTTP API, a DBOS durable-workflow queue worker, and a DBOS Kafka consumer (@DBOS.kafka_consumer) that runs one durable workflow per event to project it into Postgres and/or call an external REST API - plus ONE docker-compose project that runs the three services together with their backing stack (Postgres, Silo for S3, Redpanda, Mailpit, Aspire), dbmate migrations, OpenTelemetry wiring, and SMTP email. Use whenever the user wants to start a new async Python microservice or event-driven service, a DBOS workflow worker, a Kafka consumer-to-Postgres projector, or an order/job-processing backend, parameterized around their own namespace and domain entity. Trigger on requests like "scaffold a new FastAPI service", "new DBOS worker service", "set up a Kafka consumer that writes to Postgres", "spin up an event-driven python service with workers", or "create a service like the orders demo for <X>". Pairs with the pg-role-provisioning skill for the database/role setup. Do NOT use for a plain single-file FastAPI app with no workers/queue/events.
+description: Scaffold a new Python service from an opinionated FastAPI + DBOS + Kafka + Postgres + S3 + OTel template. Produces three deployable services that share one shape (uvicorn + FastAPI + lifespan + /health) - an HTTP API, a DBOS durable-workflow queue worker, and a DBOS Kafka consumer (@DBOS.kafka_consumer) that runs one durable workflow per event to project it into Postgres and/or call an external REST API - plus ONE docker-compose project that runs the three services together with their backing stack (Postgres, Silo for S3, Redpanda, Mailpit, otel-lgtm/Grafana), dbmate migrations, OpenTelemetry wiring, and SMTP email. Use whenever the user wants to start a new async Python microservice or event-driven service, a DBOS workflow worker, a Kafka consumer-to-Postgres projector, or an order/job-processing backend, parameterized around their own namespace and domain entity. Trigger on requests like "scaffold a new FastAPI service", "new DBOS worker service", "set up a Kafka consumer that writes to Postgres", "spin up an event-driven python service with workers", or "create a service like the orders demo for <X>". Pairs with the pg-role-provisioning skill for the database/role setup. Do NOT use for a plain single-file FastAPI app with no workers/queue/events.
 ---
 
 # FastAPI + DBOS service scaffold
@@ -31,7 +31,7 @@ and the queue registration stay per-process - see the Notes.
 
 Plus a **single** `docker-compose.yml` holding both the three app services and
 the backing stack (Postgres, Silo for S3 + a one-shot bucket creator, Redpanda +
-Console, Mailpit, Aspire) in one project on one network - no external network, no
+Console, Mailpit, otel-lgtm) in one project on one network - no external network, no
 second compose file. Then `backing/init-db.sql` (creates both databases +
 the namespace schema on a fresh volume), `db/migrations/` with `migrate.sh`
 (dbmate), `requirements.txt`, Dockerfiles, `run-local.sh` (`infra` plus the
