@@ -52,14 +52,17 @@ so the app talks plain S3 through `s3.py` and nothing is Silo-specific - moving
 to real S3 is an env change (`S3_ENDPOINT_URL` unset,
 `S3_FORCE_PATH_STYLE=false`, IAM role for creds).
 
-- The image is **pinned to a dated release**, not `:latest` - object-storage
-  tags have already moved under this template twice. Use the plain tag, not
-  `-distroless`: that variant has no `mc`/`sh`, which the healthcheck
-  (`mc ready local`) and the bucket one-shot need.
-- `.env`'s `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` are also Silo's root
-  credentials (passed in as `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`). Silo
-  enforces key >= 3 and secret >= 8 characters and won't start otherwise.
-- Blobs **persist** on the `silodata` volume; `down -v` is what clears them.
+- The image, its pinning and its volume belong to the **shared dev stack**, not
+  to this project - see the local-dev-stack skill. In the shared stack the
+  container and service are both named `s3`, which is why this project addresses
+  it as `http://s3:9000` in containers and `http://localhost:9000` on the host.
+- `.env`'s `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` must equal that stack's
+  `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`. Silo enforces key >= 3 and secret
+  >= 8 characters.
+- Blobs **persist** on the shared stack's volume. `down -v` over there clears
+  every repo's buckets, not just this one's.
+- The bucket is created by `./setup-devstack.sh` (`mc mb --ignore-existing`
+  inside the `s3` container), never by the app at startup.
 - Browse via the web console on :9001, or `mc` inside the container.
 
 ## Databases
@@ -101,18 +104,30 @@ code and migrations are **unqualified**; the role's `search_path` (set by
 provisioning) decides the schema, so nothing is tied to a schema name.
 
 Services **fail fast** if their database is missing - provisioning is a
-prerequisite (`backing/init-db.sql` locally; the `pg-role-provisioning` skill
-for real environments), not an app responsibility. Same for the S3 bucket: the
-one-shot `createbuckets` compose service creates it with `mc` (reusing the Silo
-image), never the app at startup.
+prerequisite (`backing/init-db.sql` via `./setup-devstack.sh` locally; the
+`pg-role-provisioning` skill for real environments), not an app responsibility. Same for the S3 bucket:
+`./setup-devstack.sh` creates it with `mc` inside the shared stack's `s3`
+container, never the app at startup.
 
 ## Compose, config & networking
 
-- **One compose file, one project**: `docker-compose.yml` holds the three app
-  services AND the backing services (Postgres, Silo, Redpanda + Console,
-  Mailpit, otel-lgtm). No external network, no second compose file. Backing
-  services get `restart: unless-stopped`; app services get neither that nor a
-  `container_name` (fail-fast visibility, and `--scale worker=3` must work).
+- **This project is the three app services only.** `docker-compose.yml` holds
+  `api`, `worker` and `consumer`; the backing services (Postgres, Silo/S3,
+  Redpanda + Console, Mailpit, otel-lgtm) are the machine's **shared** dev
+  stack, a separate compose project started once and used by every repo. This
+  project attaches to that stack's network as `external: true`
+  (`${DEVSTACK_NETWORK:-docker_default}`, named after the stack's directory).
+  App services get no `restart` policy and no `container_name` (fail-fast
+  visibility, and `--scale worker=3` must work).
+- **No `depends_on` on the backing services** - compose can only express that
+  within one project. The app services fail fast on a missing dependency, which
+  is the behaviour to want; start the shared stack first.
+- **`./setup-devstack.sh` does what compose used to do implicitly**: the two
+  databases + schema (`backing/init-db.sql`, now applied with `psql`, not
+  mounted into `/docker-entrypoint-initdb.d/`), the S3 bucket, the Kafka topic.
+  Every step is idempotent, so re-run it freely.
+- **Credentials must match the shared stack's `.env`**, because this project
+  connects to that stack rather than configuring it.
 - All env comes from `.env` (gitignored; copy `.env.example`). Compose
   interpolates credentials from it with `${VAR:?...}` (fails loudly if unset);
   secrets are never hardcoded in the compose file.
@@ -120,13 +135,16 @@ image), never the app at startup.
   value Postgres wants; `POSTGRES_PASSWORD_URLENC` is the same password encoded
   for the `postgresql://` URLs. A bare `@` in a password silently breaks URL
   parsing. Keep them in sync.
-- **Host vs in-network addressing differ.** Containers use service names
-  (`postgres`, `redpanda`, ...); host runs (`run-local.sh`) use published ports.
-  Redpanda is asymmetric: `redpanda:9092` in-network, `localhost:19092` on the
-  host (internal vs external advertised listener).
-- The stack claims standard host ports, so it collides with any other stack on
-  them. The fix is a `docker-compose.override.yml` using `!override` on `ports`
-  (plain lists get appended, not replaced) - see README.
+- **Host vs in-network addressing differ.** Containers use the shared stack's
+  service names (`postgres`, `s3`, `redpanda`, `mailpit`, `grafana`); host runs
+  (`run-local.sh`) use its published ports. Redpanda is asymmetric:
+  `redpanda:9092` in-network, `localhost:19092` on the host (internal vs
+  external advertised listener).
+- Only `8000-8002` are published from this project now, so it no longer collides
+  with the backing ports. Two projects scaffolded from this template still
+  collide with each other on 8000-8002; the fix is a
+  `docker-compose.override.yml` using `!override` on `ports` (plain lists get
+  appended, not replaced) - see README.
 
 ## Delivery semantics
 
@@ -158,16 +176,20 @@ consumer that also stops the Kafka poller first. Compose sets
 ## Local workflow
 
 ```bash
-cp .env.example .env            # first time
-docker compose up -d --build    # everything: backing services + the three apps
+cp .env.example .env            # first time; match the shared stack's .env
+./run-local.sh infra            # start the shared dev stack (no-op if already up)
+./setup-devstack.sh             # databases + schema, bucket, topic (idempotent)
 ./migrate.sh                    # app-DB schema (dbmate, after the DBs exist)
-# or: ./run-local.sh infra      # backing only, then run one app on the host:
+docker compose up -d --build    # the three app services
+# or run one on the host instead:
 #     ./run-local.sh {api|worker|consumer}
 ```
 
-`backing/init-db.sql` runs only on a fresh `pgdata` volume; `docker compose down
--v` is the reset. If `docker compose` isn't a plugin on this machine, use the
-standalone `docker-compose` (run-local.sh detects both).
+`./setup-devstack.sh --check` reports what exists without changing anything. If
+the shared stack is ever reset with `down -v`, re-run `setup-devstack.sh` and
+`migrate.sh` - note that reset wipes EVERY repo's data, not just this one's. If
+`docker compose` isn't a plugin on this machine, use the standalone
+`docker-compose` (run-local.sh detects both).
 
 Python 3.12 (matches the container); PEP 604 `X | None` syntax is used.
 
@@ -175,8 +197,8 @@ Python 3.12 (matches the container); PEP 604 `X | None` syntax is used.
 
 Change these together to re-theme the demo: the compose project `name:`, DB
 names (`orders_api_main`, `orders_api_dbos`), the `crane` schema +
-search_path (in `.env`, `backing/init-db.sql`), the bucket name (in `constants.py` AND the
-`createbuckets` entrypoint in `docker-compose.yml`), OTel service names
+search_path (in `.env`, `backing/init-db.sql`), the bucket name and Kafka topic
+(in `constants.py` AND `setup-devstack.sh`), OTel service names
 (`order-api`/`order-worker`/`order-consumer`), the Kafka topic (`order-events`),
 consumer group (`order-events-consumer`), DBOS queue (`orders_queue`) and the
 app name (`APP_NAME`) in `constants.py`, and the S3 bucket (`orders-bucket`).

@@ -1,6 +1,6 @@
 ---
 name: fastapi-dbos-service
-description: Scaffold a new Python service from an opinionated FastAPI + DBOS + Kafka + Postgres + S3 + OTel template. Produces three deployable services that share one shape (uvicorn + FastAPI + lifespan + /health) - an HTTP API, a DBOS durable-workflow queue worker, and a DBOS Kafka consumer (@DBOS.kafka_consumer) that runs one durable workflow per event to project it into Postgres and/or call an external REST API - plus ONE docker-compose project that runs the three services together with their backing stack (Postgres, Silo for S3, Redpanda, Mailpit, otel-lgtm/Grafana), dbmate migrations, OpenTelemetry wiring, and SMTP email. Use whenever the user wants to start a new async Python microservice or event-driven service, a DBOS workflow worker, a Kafka consumer-to-Postgres projector, or an order/job-processing backend, parameterized around their own namespace and domain entity. Trigger on requests like "scaffold a new FastAPI service", "new DBOS worker service", "set up a Kafka consumer that writes to Postgres", "spin up an event-driven python service with workers", or "create a service like the orders demo for <X>". Pairs with the pg-role-provisioning skill for the database/role setup. Do NOT use for a plain single-file FastAPI app with no workers/queue/events.
+description: Scaffold a new Python service from an opinionated FastAPI + DBOS + Kafka + Postgres + S3 + OTel template. Produces three deployable services that share one shape (uvicorn + FastAPI + lifespan + /health) - an HTTP API, a DBOS durable-workflow queue worker, and a DBOS Kafka consumer (@DBOS.kafka_consumer) that runs one durable workflow per event to project it into Postgres and/or call an external REST API - plus a docker-compose project for the three services that attaches to the machine's SHARED local dev stack (Postgres, Silo for S3, Redpanda, Mailpit, otel-lgtm/Grafana) instead of running backing services of its own, dbmate migrations, OpenTelemetry wiring, and SMTP email. Use whenever the user wants to start a new async Python microservice or event-driven service, a DBOS workflow worker, a Kafka consumer-to-Postgres projector, or an order/job-processing backend, parameterized around their own namespace and domain entity. Trigger on requests like "scaffold a new FastAPI service", "new DBOS worker service", "set up a Kafka consumer that writes to Postgres", "spin up an event-driven python service with workers", or "create a service like the orders demo for <X>". Pairs with the pg-role-provisioning skill for the database/role setup. Do NOT use for a plain single-file FastAPI app with no workers/queue/events.
 ---
 
 # FastAPI + DBOS service scaffold
@@ -29,13 +29,17 @@ and DBOS's internal queue (where `@DBOS.kafka_consumer` enqueues, and which ever
 process polls) can hand a process work it did not start. Only the Kafka poller
 and the queue registration stay per-process - see the Notes.
 
-Plus a **single** `docker-compose.yml` holding both the three app services and
-the backing stack (Postgres, Silo for S3 + a one-shot bucket creator, Redpanda +
-Console, Mailpit, otel-lgtm) in one project on one network - no external network, no
-second compose file. Then `backing/init-db.sql` (creates both databases +
-the namespace schema on a fresh volume), `db/migrations/` with `migrate.sh`
-(dbmate), `requirements.txt`, Dockerfiles, `run-local.sh` (`infra` plus the
-three services), `.env.example`, and `README.md`.
+Plus a `docker-compose.yml` holding **only** those three app services. The
+backing services (Postgres, Silo for S3, Redpanda + Console, Mailpit, otel-lgtm)
+are the machine's **shared** local dev stack - one compose project, started once,
+used by every repo - and this project attaches to its network as
+`external: true`. See the `local-dev-stack` skill for the stack itself.
+
+Then `setup-devstack.sh` (carves this project's slice out of the shared stack:
+databases, schema, bucket, topic - all idempotent), `backing/init-db.sql` (the
+SQL that script applies), `db/migrations/` with `migrate.sh` (dbmate),
+`requirements.txt`, Dockerfiles, `run-local.sh` (`infra` starts the shared stack;
+the three services run on the host), `.env.example`, and `README.md`.
 
 **Read `template/CLAUDE.md` first** - it is the source of truth for the
 conventions (service shape, "name modules for the tech", the async sync-pool vs
@@ -81,18 +85,29 @@ always set explicitly rather than left to a default.
    - `db/migrations/*_create_processed_orders.sql` - table name.
    - `docker-compose.yml` - the project `name:`, the OTel `OTEL_SERVICE_NAME`s
      (`<entity>-api/-worker/-consumer`), and the DB names in the URLs.
-   - `backing/init-db.sql` - the three DB names + the namespace schema.
-   - the `createbuckets` entrypoint in `docker-compose.yml` - the bucket name
-     (keep it equal to `constants.BUCKET_NAME`).
+   - `backing/init-db.sql` - the two DB names + the namespace schema.
+   - `setup-devstack.sh` - `BUCKET_NAME` and `KAFKA_TOPIC` (keep them equal to
+     `constants.BUCKET_NAME` and `constants.KAFKA_TOPIC`).
    - `README.md` - rename throughout.
    A careful global rename (`order`->`<entity>`, `Order`->`<Entity>`) is usually
    the fastest path; review the diff.
 
-3. **Set namespace + DB names.** Update `.env.example` DB URLs (all three), the
+3. **Set namespace + DB names.** Update `.env.example` DB URLs (both), the
    compose project `name:` and OTel names, and `backing/init-db.sql` (schema
-   name + `search_path` + all three DB names) to the chosen namespace and DB
-   names. Keep table references **unqualified** in code and migrations - the
-   schema comes from the role's `search_path`.
+   name + `search_path` + both DB names) to the chosen namespace and DB names.
+   Keep table references **unqualified** in code and migrations - the schema
+   comes from the role's `search_path`.
+
+   The database, bucket and topic names are what keep this project's data apart
+   from every other project's in the shared stack, so they must be unique per
+   project - the `<app>_main`/`<app>_dbos` convention handles that as long as
+   each project picks its own `<app>` base.
+
+   Also point `.env.example` at the shared stack: `DEVSTACK_DIR` (where its
+   compose file lives, default `~/Developer/docker`) and `DEVSTACK_NETWORK` (its
+   network, `<that directory>_default`). The Postgres and S3 credentials must
+   **match that stack's own `.env`** - this project connects to it, it does not
+   configure it.
 
    `.env.example` carries the password twice on purpose: `POSTGRES_PASSWORD`
    (raw, for the Postgres container) and `POSTGRES_PASSWORD_URLENC`
@@ -106,19 +121,22 @@ always set explicitly rather than left to a default.
    cache database
    unused (pass `-k` to skip creating it). Point `DBOS_DATABASE_URL` at
    `<app>_dbos` explicitly - it is shorter than the name DBOS would derive on
-   its own. (`backing/init-db.sql` is only a minimal local stand-in for the
-   bundled backing stack.)
+   its own. (`backing/init-db.sql`, applied by `./setup-devstack.sh`, is only a
+   minimal local stand-in for it.)
 
 5. **Bring it up** (also in `README.md`):
    ```bash
-   cp .env.example .env            # fill in credentials
-   docker compose up -d --build    # backing stack + api :8000, worker :8001, consumer :8002
+   cp .env.example .env            # credentials must match the shared stack's .env
+   ./run-local.sh infra            # start the shared dev stack (no-op if already up)
+   ./setup-devstack.sh             # databases, schema, bucket, topic (idempotent)
    ./migrate.sh                    # dbmate: create the read-model table
+   docker compose up -d --build    # api :8000, worker :8001, consumer :8002
    ```
-   `dbmate` must be on PATH (standalone binary). On a machine where Compose is
-   only the standalone binary, it's `docker-compose` instead of `docker
-   compose`. A cold `up` can report a spurious `dependency failed to start ...
-   is unhealthy` on some Compose builds; a second `up -d` converges.
+   The shared stack must be up **before** `docker compose up`, or compose stops
+   with `network docker_default declared as external, but could not be found` -
+   that is the intended failure, not a bug to work around. `dbmate` must be on
+   PATH (standalone binary). On a machine where Compose is only the standalone
+   binary, it's `docker-compose` instead of `docker compose`.
 
 ## Notes
 
@@ -144,29 +162,43 @@ always set explicitly rather than left to a default.
   `consumer_workflows.py` to the consumer. Importing one into the other
   registers its workflows in the wrong process.
 - Don't hardcode credentials in compose - interpolate from `.env` (the template
-  already does this with `${VAR:?...}`). The AWS keys double as Silo's root
-  credentials, so they're stated once (key >= 3, secret >= 8 characters).
-- Keep it **one compose project**: backing services and app services in the same
-  file on the default network. Backing services take `restart: unless-stopped`;
-  app services take no restart policy (fail-fast must be visible) and no
-  `container_name` (it breaks `--scale` and collides across projects).
-- The stack claims standard host ports, so two scaffolded projects (or a shared
-  stack) conflict. The answer is a `docker-compose.override.yml` with
+  already does this with `${VAR:?...}`). The Postgres and S3 credentials must
+  equal the shared stack's, since this project connects to that stack rather
+  than configuring it.
+- **Don't put backing services in this compose file.** They are the shared dev
+  stack's, and a second Postgres or Redpanda on the same machine is exactly what
+  that stack exists to prevent. This project declares that stack's network as
+  `external: true` and addresses `postgres`, `s3`, `redpanda`, `mailpit` and
+  `grafana` by service name. App services take no restart policy (fail-fast must
+  be visible) and no `container_name` (it breaks `--scale` and collides across
+  projects).
+- **No `depends_on` on the backing services** - compose can only express that
+  within one project. Start the shared stack first; `external: true` makes
+  compose refuse to start if it isn't up, which is the right failure.
+- Only `8000-8002` are published here now, so this no longer fights the backing
+  ports. Two projects scaffolded from this template still collide with each other
+  there; the answer is a `docker-compose.override.yml` with
   `ports: !override [...]` - a plain list is appended, not replaced.
 - **Object storage is Silo** (`pgsty/silo`), a maintained community fork of the
-  open-source MinIO server. It keeps MinIO's S3 API, `MINIO_*` env vars and
-  on-disk format, so it's a drop-in: blobs persist on a volume, the web console
-  is on :9001, and `mc` ships inside the image (used for the healthcheck
-  `mc ready local` and the `createbuckets` one-shot). Keep the image **pinned to
-  a dated `RELEASE.*` tag**, and use the plain tag, not `-distroless` (no
-  `mc`/`sh` there).
+  open-source MinIO server, running in the shared stack as the service and
+  container `s3`. It keeps MinIO's S3 API, `MINIO_*` env vars and on-disk format,
+  so it's a drop-in: blobs persist on that stack's volume, the web console is on
+  :9001, and `mc` ships inside the image (which is how `setup-devstack.sh`
+  creates the bucket).
   - Don't reach for MinIO or LocalStack instead: `minio/minio` and `minio/mc`
     were withdrawn from Docker Hub (404), and `localstack/localstack:latest`
     exits with `License activation failed!` without a `LOCALSTACK_AUTH_TOKEN`
     (its last free line is 4.9, and its community S3 is in-memory only).
-  - `.env`'s AWS keys double as Silo's root credentials. Silo enforces key >= 3
-    and secret >= 8 characters and refuses to start otherwise, so `test`/`test`
-    is not a usable default.
+  - `.env`'s AWS keys are the shared stack's Silo root credentials. Silo enforces
+    key >= 3 and secret >= 8 characters and refuses to start otherwise, so
+    `test`/`test` is not a usable default.
+- **Provisioning is a script now, not a compose side effect.** `setup-devstack.sh`
+  creates the databases, schema, bucket and topic; nothing happens implicitly on
+  a fresh volume, because the Postgres volume belongs to every repo. Keep every
+  step idempotent so it can be re-run after a stack reset.
+- **Never tell the user to `down -v` the shared stack** to fix this project - it
+  deletes every repo's data. Drop this project's own databases and bucket and
+  re-run `setup-devstack.sh` instead (README "Resetting").
 - Drop any service the user doesn't need (e.g. no Kafka consumer, or no email),
   but preserve the lifespan + `/health` shape for the ones that remain. Dropping
   the consumer leaves the system database in place - it belongs to the app, not

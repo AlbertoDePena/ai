@@ -9,3 +9,6 @@ __pycache__/
 *.py[cod]
 # Claude Code local settings (machine-specific)
 .claude/settings.local.json
+
+# Local port remapping when two projects collide on 8000-8002 (see README)
+docker-compose.override.yml

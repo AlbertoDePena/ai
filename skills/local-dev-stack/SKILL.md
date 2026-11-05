@@ -130,8 +130,7 @@ any data the user still wants first — ask before destroying volumes.
 - **No healthchecks, by design.** `depends_on: service_healthy` only works
   inside one compose project, and apps are no longer in this one. An app that
   needs to wait should retry its own connection on startup.
-- The `fastapi-dbos-service` skill scaffolds its own compose project with the
-  app services *and* a copy of these backing services. On a machine running
-  this shared stack, strip the backing services out of what it generates and
-  point the three app services at the shared endpoints — don't run two Postgres
-  containers.
+- The `fastapi-dbos-service` skill scaffolds onto this stack: its compose file
+  holds only its three app services and attaches to this stack's network as
+  `external: true`. Its `setup-devstack.sh` is the onboarding above, written out
+  per project — read it for a worked example of carving out a slice.

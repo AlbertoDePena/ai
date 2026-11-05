@@ -5,7 +5,7 @@ A small order-processing service built from:
 | Component | Role |
 |---|---|
 | **FastAPI** (`api`) | HTTP API + dashboard; accepts orders and enqueues them for processing |
-| **Silo** | S3-compatible object storage where order blobs are written and updated; a maintained fork of open-source MinIO, same API as real S3 |
+| **Silo** | S3-compatible object storage where order blobs are written and updated; a maintained fork of open-source MinIO, same API as real S3 (from the shared dev stack) |
 | **DBOS** (backed by Postgres) | Durable workflow queue - survives worker crashes and resumes from the last completed step instead of losing or reprocessing an order |
 | **Redpanda** | Kafka-wire-compatible broker; an `order.processed` business event is published after each order finishes |
 | **Consumer** (`consumer.py`) | DBOS Kafka consumer: `@DBOS.kafka_consumer` starts one durable workflow per `order.processed` event, which projects it into Postgres and notifies a downstream REST API |
@@ -42,13 +42,14 @@ All three processes export OTel traces/metrics/logs -> otel-lgtm (Tempo/Loki/Pro
 
 ## Run it
 
-**One compose project holds everything** - the three app processes (`api`, `worker`,
-`consumer`) and the backing services they need (Postgres, Silo for S3, Redpanda + Console,
-Mailpit, otel-lgtm). They share the project's default network, so the app services
-address the backing ones by service name (`postgres`, `silo:9000`, `redpanda:9092`, `mailpit`,
-`otel:4317`) with no external network to create first.
+**This project is the three app processes** (`api`, `worker`, `consumer`). The backing
+services they need - Postgres, Silo for S3, Redpanda + Console, Mailpit, otel-lgtm - are the
+machine's **shared local dev stack**: one compose project, started once, used by every repo.
+This project attaches to that stack's network and addresses it by service name (`postgres`,
+`s3:9000`, `redpanda:9092`, `mailpit`, `grafana:4317`).
 
-**Prerequisites:** Docker, and [dbmate](https://github.com/amacneil/dbmate#installation) on
+**Prerequisites:** Docker, the shared dev stack running (`cd ~/Developer/docker &&
+docker-compose up -d`), and [dbmate](https://github.com/amacneil/dbmate#installation) on
 your PATH (a standalone binary - `brew install dbmate`).
 
 > **`docker compose` vs `docker-compose`.** Compose ships either as a `docker` CLI plugin
@@ -63,33 +64,43 @@ your PATH (a standalone binary - `brew install dbmate`).
 
 1. Create your env file:
    ```bash
-   cp .env.example .env   # defaults work as-is; edit if needed
+   cp .env.example .env   # defaults match the shared stack's defaults; edit if yours differ
    ```
-2. Start everything:
+   The credentials in it must **match the shared stack's own `.env`** - this project connects
+   to that stack, it doesn't configure it.
+2. Make sure the shared dev stack is up, then carve out this project's slice:
    ```bash
-   docker compose up -d --build
+   ./run-local.sh infra    # `docker-compose up -d` in the shared stack's directory (no-op if up)
+   ./setup-devstack.sh     # this project's databases, schema, bucket and topic
    ```
-   On the very first start, Postgres runs `backing/init-db.sql`, which creates both
-   databases - `orders_api_main` (the application DB) and `orders_api_dbos` (the DBOS system DB,
-   shared by the worker and the consumer) - plus the `crane` schema and its `search_path`. That
-   script is a minimal local stand-in for provisioning; real environments use the
-   `pg-role-provisioning` skill. Either way the services **fail if their database is
-   missing** - provisioning is a prerequisite, not an app job.
+   `setup-devstack.sh` applies `backing/init-db.sql`, which creates both databases -
+   `orders_api_main` (the application DB) and `orders_api_dbos` (the DBOS system DB, shared by
+   the worker and the consumer) - plus the `crane` schema and its `search_path`; then it
+   creates the `orders-bucket` bucket and the `order-events` topic. Every step is idempotent,
+   so re-run it any time (`--check` reports without changing anything). That SQL is a minimal
+   local stand-in for provisioning; real environments use the `pg-role-provisioning` skill.
+   Either way the services **fail if their database is missing** - provisioning is a
+   prerequisite, not an app job.
 3. Apply the application-DB schema with dbmate (DBOS migrates its own system DB itself):
    ```bash
    ./migrate.sh          # runs `dbmate up` against orders_api_main (see "Migrations" below)
    ```
+4. Start the app services:
+   ```bash
+   docker compose up -d --build
+   ```
 
-> **If a cold `up` reports `dependency failed to start: container ... is unhealthy`,** run
-> `docker compose up -d` once more. Some Compose builds misread a dependency's health while
-> its container is still being created; the second run converges. (You can confirm Postgres
-> itself is fine with `docker compose ps` - it reports `healthy`.)
+> **`external: true` means the stack must already be up.** If it isn't, compose stops with
+> `network docker_default declared as external, but could not be found`. That is the intended
+> failure - start the shared stack and try again. There is no `depends_on` on the backing
+> services either: compose can only express that within one project, so these services instead
+> fail fast and visibly on a missing dependency.
 
 > **Credentials come from `.env`.** They aren't hardcoded in `docker-compose.yml` - compose
 > interpolates them from `.env`, which it loads automatically (no flag needed). Only the
-> secrets come from there; the in-network hostnames (`postgres`, `redpanda`, ...) stay literal
-> in the compose file, since they differ from `.env`'s host-side values (`localhost`, `19092`,
-> ...). If `.env` is missing or incomplete, compose stops with `required variable
+> secrets come from there; the in-network hostnames (`postgres`, `s3`, `redpanda`, ...) stay
+> literal in the compose file, since they differ from `.env`'s host-side values (`localhost`,
+> `19092`, ...). If `.env` is missing or incomplete, compose stops with `required variable
 > POSTGRES_PASSWORD is missing a value: set it in .env` rather than starting with blank
 > credentials. `.env` is gitignored, so it never lands in version control.
 
@@ -107,6 +118,7 @@ your PATH (a standalone binary - `brew install dbmate`).
   are in Tempo, logs in Loki, metrics in Prometheus, all pre-wired as datasources
 - **Silo console** (browse the bucket): http://localhost:9001 - sign in with the
   `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` from `.env`
+  (the shared stack's root credentials)
 - **Redpanda Console**: http://localhost:8080 (inspect the `order-events` topic to watch messages land)
 - **Mailpit**: http://localhost:8025 (watch the confirmation emails the worker sends)
 
@@ -126,84 +138,91 @@ apart.)
 > manually persisting a `traceparent` at enqueue time and re-establishing the context on the
 > worker before the workflow runs).
 
-### Running alongside another stack
+### Running alongside another project
 
-Because the stack ships inside the project, it claims the standard host ports (5432, 9000,
-9001, 8080, 1025, 8025, 3000, 4317, 4318, 8000-8002). If you already run another stack on
-them -
-a shared one, or a second project scaffolded from this template - you'll get
-`Bind for 0.0.0.0:5432 failed: port is already allocated`. Two ways out:
+The backing ports (5432, 9000, 9001, 8080, 1025, 8025, 3000, 4317, 4318) belong to the shared
+stack, so this project no longer competes for them - sharing them is the whole point. It does
+still publish **8000-8002** for the three app services, so a second project scaffolded from
+this template collides there. Two ways out:
 
-- **Stop the other stack**, then `docker compose up -d` here.
-- **Move this project's ports** with a `docker-compose.override.yml` next to
+- **Stop the other project's app services**, then `docker compose up -d` here.
+- **Move this project's app ports** with a `docker-compose.override.yml` next to
   `docker-compose.yml`. Compose merges it automatically, so no flags and no edits to the
   checked-in file (add it to `.gitignore` if the offsets are personal to your machine):
 
   ```yaml
   # docker-compose.override.yml
   services:
-    postgres:
-      ports: !override ["15432:5432"]
-    silo:
-      ports: !override ["19000:9000", "19001:9001"]
     api:
       ports: !override ["18000:8000"]
+    worker:
+      ports: !override ["18001:8001"]
+    consumer:
+      ports: !override ["18002:8002"]
   ```
 
   **`!override` is required.** Without it compose *appends* to the port list rather than
-  replacing it, so the original binding stays and the conflict remains. Remember to update the
-  host-side URLs in `.env` (`APP_DATABASE_URL`, `KAFKA_BOOTSTRAP_SERVERS`, ...) to match, since
-  `run-local.sh` and `migrate.sh` use them.
+  replacing it, so the original binding stays and the conflict remains.
+
+Two projects on the shared stack also need **distinct database, bucket and topic names** - that
+is what keeps their data apart now that the server is shared. The `<app>_main`/`<app>_dbos`
+suffix convention does this as long as each project picks its own `<app>` base.
 
 Container names are left to Compose (it prefixes them with the project name) precisely so two
 projects don't collide on names as well as ports.
 
-### Resetting, and "the init script already ran"
+### Resetting
 
-`backing/init-db.sql` is mounted into `/docker-entrypoint-initdb.d/` and Postgres runs it
-**only on first init of an empty data volume**. Change it later, or point the stack at a volume
-that already has data, and it will not run again - you'll see
-`FATAL: database "orders_api_main" does not exist` from the app services. To start clean:
+`./setup-devstack.sh` is idempotent and re-runnable, so recovering from a missing database is
+just running it again:
 
 ```bash
-docker compose down -v      # -v drops the volumes, including pgdata
-docker compose up -d --build
-./migrate.sh
+./setup-devstack.sh          # recreate anything missing
+./setup-devstack.sh --check  # or just look first
+./migrate.sh                 # re-apply the app schema if the DB was recreated
 ```
 
-If you'd rather keep the existing data, apply the missing pieces by hand instead:
+To wipe only **this project's** data, drop its databases and bucket and run the setup again:
 
 ```bash
-docker compose exec postgres psql -U "$POSTGRES_USER" -d postgres \
-  -c 'CREATE DATABASE orders_api_main' -c 'CREATE DATABASE orders_api_dbos'
+docker exec -i postgres psql -U "$POSTGRES_USER" -d postgres \
+  -c 'DROP DATABASE IF EXISTS orders_api_main' \
+  -c 'DROP DATABASE IF EXISTS orders_api_dbos'
+docker exec -i s3 mc rb --force local/orders-bucket
+./setup-devstack.sh && ./migrate.sh
 ```
+
+> **Don't reach for `docker compose down -v` on the shared stack.** Over there it deletes
+> every repo's databases and buckets, not just this project's. In this project's own directory
+> `down -v` is harmless - these three services have no volumes.
 
 (The DBOS system database is the forgiving one - DBOS creates its own tables in it if missing.
 Only the application database is strictly provisioned out of band.)
 
 ## Run locally (no containers)
 
-You can run `api`, `worker`, and `consumer` straight on the host while the backing services
-stay in Docker - handy for a debugger, breakpoints, or `--reload`. The addressing differs from
-the containers: you use the services' **host-published ports**, and Redpanda in particular
-flips to `localhost:19092` (its external listener) rather than the in-network `redpanda:9092`.
-Those values are what `.env` holds, and `run-local.sh` sources it.
+You can run `api`, `worker`, and `consumer` straight on the host while the shared stack stays
+in Docker - handy for a debugger, breakpoints, or `--reload`. The addressing differs from the
+containers: you use the stack's **host-published ports**, and Redpanda in particular flips to
+`localhost:19092` (its external listener) rather than the in-network `redpanda:9092`. Those
+values are what `.env` holds, and `run-local.sh` sources it.
 
 ```bash
-./run-local.sh infra     # backing services only (no api/worker/consumer)
+./run-local.sh infra     # start the shared dev stack (no-op if already running)
 ./run-local.sh api       # terminal 1: API + dashboard on :8000
 ./run-local.sh worker    # terminal 2: DBOS queue worker (+ /health) on :8001
 ./run-local.sh consumer  # terminal 3: DBOS Kafka consumer (+ /health) on :8002
 ```
 
-`infra` is just `docker compose up -d` for the backing service names, so the three app services
-in the same compose file stay down and you run them yourself. `run-local.sh` creates the
-`.venv` and installs requirements on first run, then execs the process. `DEV_MODE=true` in
-`.env` authenticates you as a local dev user, so no Azure vars are needed.
+`infra` runs `docker compose up -d` in the **shared stack's** directory - `$DEVSTACK_DIR`,
+default `~/Developer/docker` - not in this project; the backing services don't live here any
+more. `run-local.sh` creates the `.venv` and installs requirements on first run, then execs the
+process. `DEV_MODE=true` in `.env` authenticates you as a local dev user, so no Azure vars are
+needed.
 
-`.env`'s `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` are also Silo's root credentials - compose
-passes them through as `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` - so they're stated once. Silo
-enforces a minimum length (key >= 3, secret >= 8) and refuses to start otherwise.
+`.env`'s `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` must match the shared stack's
+`MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`; so must `POSTGRES_USER`/`POSTGRES_PASSWORD`. They are
+that stack's credentials, and this project only consumes them.
 
 > **Python version:** the code uses PEP 604 (`X | None`) syntax and targets the container's
 > Python 3.12. It also runs on 3.9 (macOS system Python) because `kafka.py` defers annotation
@@ -212,16 +231,22 @@ enforces a minimum length (key >= 3, secret >= 8) and refuses to start otherwise
 
 ## Networking
 
-**In containers**, everything is on the compose project's default network and uses
+**In containers**, the three app services attach to the shared stack's network
+(`${DEVSTACK_NETWORK:-docker_default}`, declared `external: true`) and reach it by
 service-name DNS:
 
-| Service | In container (compose network) | On the host (`.env`) |
+| Service | In container (shared stack's network) | On the host (`.env`) |
 |---|---|---|
 | Postgres | `postgres:5432` | `localhost:5432` |
-| S3 (Silo) | `silo:9000` | `localhost:9000` |
+| S3 (Silo) | `s3:9000` | `localhost:9000` |
 | Redpanda | `redpanda:9092` | `localhost:19092` |
-| OTLP gRPC (otel-lgtm) | `otel:4317` | `localhost:4317` |
-| Grafana UI | `otel:3000` | `localhost:3000` |
+| SMTP (Mailpit) | `mailpit:1025` | `localhost:1025` |
+| OTLP gRPC (otel-lgtm) | `grafana:4317` | `localhost:4317` |
+| Grafana UI | `grafana:3000` | `localhost:3000` |
+
+Those names are the shared stack's **service** names, which there double as container names.
+The network is named after that stack's directory (`docker_default` for `~/Developer/docker`);
+point `DEVSTACK_NETWORK` elsewhere if yours differs.
 
 Two databases live on the same Postgres host above - different databases, not different
 servers: the application DB (`orders_api_main`) and the DBOS system DB (`orders_api_dbos`), which the
@@ -231,7 +256,7 @@ See "Why one DBOS system database" below.
 
 Redpanda is the one that isn't symmetric. **In a container** it must be reached on-network at
 `redpanda:9092` - it advertises its internal listener as `redpanda:9092`, resolvable only for
-containers on the compose network. **On the host** you use `localhost:19092` - its external
+containers on that network. **On the host** you use `localhost:19092` - its external
 listener is published on the host as `:19092` and advertises `localhost:19092`, which resolves
 from the host but is unreachable from inside another container. Everything else is just the
 service name vs. its host-published port.
@@ -253,35 +278,38 @@ existing MinIO data directory can be used as-is.
 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env vars (let the Fargate task's IAM role supply
 credentials), and set `S3_FORCE_PATH_STYLE=false`. No code changes.
 
-**Credentials.** `.env`'s AWS keys are also Silo's root credentials - compose feeds them in as
-`MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`, so there's one pair to change. Silo validates their
-length at startup and exits with
+**Credentials.** `.env`'s AWS keys are the shared stack's Silo root credentials
+(`MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` over there), so copy them rather than inventing them.
+Silo validates their length at startup and exits with
 `MINIO_ROOT_USER length should be at least 3, and MINIO_ROOT_PASSWORD length at least 8
 characters` if they're too short - so `test`/`test` won't do.
 
 **Browsing blobs.** Silo keeps MinIO's web console: http://localhost:9001, signing in with
-those same credentials. The `mc` CLI also ships inside the image:
+those same credentials. The `mc` CLI also ships inside the image - the container is named `s3`
+in the shared stack, so address it directly rather than through this project's compose:
 
 ```bash
-docker compose exec silo mc alias set s http://silo:9000 "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
-docker compose exec silo mc ls --recursive s/orders-bucket
-docker compose exec silo mc cat s/orders-bucket/orders/<id>.json
+docker exec -i s3 mc alias set local http://localhost:9000 "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
+docker exec -i s3 mc ls --recursive local/orders-bucket
+docker exec -i s3 mc cat local/orders-bucket/orders/<id>.json
 ```
 
-**The bucket** is created by the one-shot `createbuckets` service, which reuses the Silo image
-(already pulled, and it contains `mc`) rather than fetching a separate CLI image. The app
-services gate on it with `condition: service_completed_successfully`, and it in turn waits for
-Silo's own healthcheck (`mc ready local`).
+**The bucket** is created by `./setup-devstack.sh` with `mc mb --ignore-existing` inside that
+same container - the shared stack holds every project's buckets, so each project creates its
+own. Nothing gates the app services on it existing; run the setup script before the first
+order.
 
-**Blobs persist.** Silo writes to a real filesystem, so the `silodata` volume keeps objects
-across container restarts and `docker compose down` / `up` cycles - only `down -v` clears them.
+**Blobs persist.** Silo writes to a real filesystem, so the shared stack's volume keeps objects
+across container restarts and `down` / `up` cycles. Only a `down -v` over there clears them -
+and that clears every repo's buckets, so drop just this project's with
+`docker exec -i s3 mc rb --force local/orders-bucket` instead.
 
-> **The image is pinned to a dated release** (`pgsty/silo:RELEASE.2026-09-16T00-00-00Z`) rather
-> than `:latest`. Object-storage tags have moved under us twice already - `minio/minio` and
-> `minio/mc` were withdrawn from Docker Hub entirely, and `localstack/localstack:latest` now
-> refuses to start without a license token - so this one is nailed down. Also use the plain
-> tag, **not** `-distroless`: that variant drops the `mc` and `sh` that the healthcheck and the
-> bucket one-shot rely on.
+> **The image is the shared stack's concern**, and it pins a dated release
+> (`pgsty/silo:RELEASE.2026-09-16T00-00-00Z`) rather than `:latest`. Object-storage tags have
+> moved under us twice already - `minio/minio` and `minio/mc` were withdrawn from Docker Hub
+> entirely, and `localstack/localstack:latest` now refuses to start without a license token -
+> so it is nailed down over there. It also uses the plain tag, **not** `-distroless`: that
+> variant drops the `mc` and `sh` that its healthcheck and `setup-devstack.sh` rely on.
 
 ### Durable workflow queue (DBOS)
 
@@ -525,10 +553,10 @@ Flip `DEV_MODE=false` on the `api` service in `docker-compose.yml` and provide
 
 ## Moving to Fargate / prod
 
-| Env var | Local (compose + `.env`) | Prod |
+| Env var | Local (shared stack + `.env`) | Prod |
 |---|---|---|
-| `S3_ENDPOINT_URL` | `http://silo:9000` | unset (real AWS) |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `minioadmin` / `minioadmin` (also Silo's root creds) | unset (use IAM role) |
+| `S3_ENDPOINT_URL` | `http://s3:9000` | unset (real AWS) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `minioadmin` / `minioadmin` (the shared stack's Silo root creds) | unset (use IAM role) |
 | `S3_FORCE_PATH_STYLE` | `true` | `false` |
 | `DBOS_DATABASE_URL` (worker + consumer + api) | `postgres:5432/orders_api_dbos` | your RDS/Aurora Postgres instance - the **same** database for all three |
 | `APP_DATABASE_URL` (consumer + api) | `postgres:5432/orders_api_main` | your RDS/Aurora Postgres instance |
@@ -536,6 +564,6 @@ Flip `DEV_MODE=false` on the `api` service in `docker-compose.yml` and provide
 | `SMTP_HOST` / `SMTP_PORT` (worker) | `mailpit` / `1025` | SES SMTP endpoint (e.g. `email-smtp.us-east-1.amazonaws.com` / `587`) |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_USE_TLS` (worker) | unset / unset / `false` | SES SMTP credentials / `true` |
 | `EXTERNAL_API_URL` / `EXTERNAL_API_TOKEN` (consumer) | unset (step skipped) | your downstream REST API + its token |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel:4317` | your ADOT sidecar or collector |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://grafana:4317` | your ADOT sidecar or collector |
 
 Each of `api`, `worker`, and `consumer` maps to its own ECS task definition/service.
