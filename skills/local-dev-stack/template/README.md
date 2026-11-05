@@ -15,6 +15,10 @@ docker-compose down -v   # stop, wipe data volumes
 
 `${APP_NAME}_s3_setup` is a one-shot bucket creator — `exited (0)` is success.
 
+Telemetry lands in Grafana: traces in Tempo, logs in Loki, metrics in
+Prometheus, all pre-wired as datasources. It persists across restarts, so
+yesterday's traces are still queryable.
+
 ## Endpoints
 
 | Service | Where | Credentials |
@@ -26,8 +30,9 @@ docker-compose down -v   # stop, wipe data volumes
 | SMTP | `localhost:${MAILPIT_SMTP_PORT}` | any / any |
 | Kafka (Redpanda) | `localhost:${KAFKA_PORT}` | — |
 | Redpanda console | http://localhost:${KAFKA_CONSOLE_PORT} | — |
-| Aspire dashboard | http://localhost:${ASPIRE_UI_PORT} | — |
-| OTLP endpoint | http://localhost:${ASPIRE_OTLP_PORT} | — |
+| Grafana (otel-lgtm) | http://localhost:${OTEL_UI_PORT} | anonymous admin, no login |
+| OTLP gRPC | `localhost:${OTEL_OTLP_GRPC_PORT}` | — |
+| OTLP HTTP | http://localhost:${OTEL_OTLP_HTTP_PORT} | — |
 
 ## App config
 
@@ -41,11 +46,14 @@ S3_BUCKET=${S3_BUCKET}
 KAFKA_BOOTSTRAP_SERVERS=localhost:${KAFKA_PORT}
 SMTP_HOST=localhost
 SMTP_PORT=${MAILPIT_SMTP_PORT}
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:${ASPIRE_OTLP_PORT}
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:${OTEL_OTLP_GRPC_PORT}
 OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+# HTTP-only exporters (Pydantic Logfire, the DBOS Python SDK) instead want:
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:${OTEL_OTLP_HTTP_PORT}
+# OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 ```
 
 Containers reach each other by service name on the compose network
 (`postgres:5432`, `silo:9000`, `redpanda:9092`, `mailpit:1025`,
-`aspire-dashboard:18889`) — the host ports above are only for processes running
+`otel:4317`) — the host ports above are only for processes running
 outside Docker.

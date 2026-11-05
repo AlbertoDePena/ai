@@ -1,10 +1,12 @@
 """
 OpenTelemetry setup for traces, metrics, and logs.
 
-No collector/sidecar here - this exports OTLP directly to the .NET Aspire
-Dashboard container, which speaks OTLP natively. In ECS/Fargate later, you'd
-just swap OTEL_EXPORTER_OTLP_ENDPOINT to point at whatever collects it
-(ADOT sidecar, Grafana Alloy, etc.) - nothing else in this file changes.
+No collector/sidecar here - this exports OTLP directly to the otel-lgtm
+container (Grafana + Loki + Tempo + Prometheus), which speaks OTLP natively.
+The exporters below are the gRPC ones, so the endpoint is the 4317 port, not
+4318. In ECS/Fargate later, you'd just swap OTEL_EXPORTER_OTLP_ENDPOINT to
+point at whatever collects it (ADOT sidecar, Grafana Alloy, etc.) - nothing
+else in this file changes.
 """
 
 import logging
@@ -22,7 +24,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-OTLP_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:18889")
+OTLP_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "fastapi-aws-demo")
 
 _configured = False
@@ -72,7 +74,7 @@ def configure_otel() -> None:
     root_logger.setLevel(logging.INFO)
 
     # Also log to stdout. Without this the root logger only has the OTel
-    # handler, so app logs (api.py, kafka.py, ...) ship to Aspire but never
+    # handler, so app logs (api.py, kafka.py, ...) ship to Loki but never
     # appear in `docker logs` / the console - surprising for operators. DBOS
     # attaches its own stream handler, which is why only its logs show up
     # otherwise.

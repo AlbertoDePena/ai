@@ -8,18 +8,38 @@
 #   docker-compose down         # stop (keeps data)
 #   docker-compose down -v      # stop and delete the data volumes
 services:
-  # Aspire dashboard — local OTLP endpoint for traces/logs/metrics.
-  #   UI:   http://localhost:${ASPIRE_UI_PORT}
-  #   OTLP: http://localhost:${ASPIRE_OTLP_PORT}
-  aspire-dashboard:
-    image: mcr.microsoft.com/dotnet/aspire-dashboard:latest
-    container_name: ${APP_NAME}_aspire
+  # OpenTelemetry LGTM — Grafana + Loki + Tempo + Prometheus + Pyroscope in one
+  # container. The local OTLP endpoint for traces/logs/metrics, with real
+  # dashboards and queryable backends behind it.
+  #   Grafana:   http://localhost:${OTEL_UI_PORT}   (anonymous admin, no login)
+  #   OTLP gRPC: http://localhost:${OTEL_OTLP_GRPC_PORT}
+  #   OTLP HTTP: http://localhost:${OTEL_OTLP_HTTP_PORT}
+  #
+  # WHY NOT THE ASPIRE DASHBOARD
+  #
+  # The .NET Aspire dashboard is the lighter option, but it only *displays*
+  # telemetry — it holds a bounded in-memory buffer, has no query language, no
+  # dashboards, and keeps nothing across a restart. otel-lgtm persists to the
+  # volume below, so a trace from this morning is still there this afternoon,
+  # and PromQL/LogQL/TraceQL all work against it.
+  #
+  # Both OTLP ports are published because SDKs differ on transport: the .NET and
+  # Go SDKs default to gRPC, while Pydantic Logfire exports OTLP/HTTP only (it
+  # imports opentelemetry.exporter.otlp.proto.http and offers no protocol
+  # switch), as does the DBOS Python SDK. Publishing both lets either kind of
+  # client point here without a collector in between.
+  otel:
+    image: grafana/otel-lgtm:latest
+    container_name: ${APP_NAME}_otel
     restart: unless-stopped
-    environment:
-      DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS: "true"
     ports:
-      - "${ASPIRE_UI_PORT}:18888"
-      - "${ASPIRE_OTLP_PORT}:18889"
+      - "${OTEL_UI_PORT}:3000"
+      - "${OTEL_OTLP_GRPC_PORT}:4317"
+      - "${OTEL_OTLP_HTTP_PORT}:4318"
+    volumes:
+      # One mount covers all five backends: /data holds grafana/, prometheus/,
+      # loki/, tempo/ and pyroscope/.
+      - lgtmdata:/data
 
   # Silo — S3-compatible object storage for local dev/testing.
   #   API:     http://localhost:${S3_PORT}
@@ -174,3 +194,4 @@ volumes:
   pgdata:
   mailpitdata:
   redpandadata:
+  lgtmdata:
