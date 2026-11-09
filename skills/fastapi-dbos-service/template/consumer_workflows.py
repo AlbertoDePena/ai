@@ -15,6 +15,11 @@ Why this replaced the hand-rolled poll loop (manual commit + idempotent upsert):
   redelivered message (consumer rebalance, restart, at-least-once broker) is
   therefore a no-op rather than a re-run: exactly-once *processing* on top of
   at-least-once *delivery*, without us tracking offsets by hand.
+- DBOS 3.x also stores the offset itself, only after the workflow is durably
+  enqueued, and leans on Kafka's auto-commit to flush it. It forces
+  `enable.auto.offset.store=False` for that reason and overrides an
+  `enable.auto.commit=False` in our config with a warning - so a commit can
+  never outrun durable state, and offsets still advance.
 - Each side effect is its own step, so a crash between them resumes from the
   last completed one. The Postgres write isn't redone just because the
   downstream API call failed, and vice versa.
@@ -36,6 +41,7 @@ both processes can run the workflows those messages produce.
 
 import json
 import logging
+from typing import Literal
 
 import appdb
 import otel_setup
@@ -51,13 +57,23 @@ events_projected_counter = meter.create_counter(
 )
 
 # Read by consumer.py, which is where the Kafka poller is attached.
-# in_order=False lets DBOS run workflows for different messages concurrently,
-# which is what you want for an idempotent projection like this one. Flip it to
-# True and DBOS gives the topic its own queue with concurrency=1, processing
-# messages strictly in offset order - correct when later events overwrite
-# earlier ones for the same key, slower otherwise. (in_order=True doesn't work
-# with regex topic selectors.)
-KAFKA_IN_ORDER = False
+#
+# DBOS 3.x replaced 2.x's boolean `in_order` with three ordering modes:
+#   "none"      - no ordering; workflows for different messages run
+#                 concurrently. Right for an idempotent projection like this
+#                 one, and the only mode that accepts a custom queue_name.
+#   "partition" - ordered within each Kafka partition, parallel across
+#                 partitions. The usual choice when order matters, since
+#                 Kafka only guarantees order per partition anyway.
+#   "topic"     - strictly ordered across the whole topic (the closest
+#                 equivalent of 2.x `in_order=True`). Correct when later
+#                 events overwrite earlier ones for the same key and the key
+#                 is not the partition key; slowest, no parallelism at all.
+# Ordered modes share an internal partitioned queue, so they cannot be
+# combined with a custom queue.
+# Spelled out rather than imported: DBOS exports the KafkaOrdering alias only
+# from a private module.
+KAFKA_ORDERING: Literal["none", "partition", "topic"] = "none"
 
 
 @DBOS.step()

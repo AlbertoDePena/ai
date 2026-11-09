@@ -9,6 +9,7 @@ from dbos import DBOSClient, EnqueueOptions
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+from opentelemetry.context import get_current as get_current_otel_context
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from pydantic import BaseModel
@@ -109,12 +110,19 @@ async def create_order(order: OrderIn, user: dict = Depends(get_current_user)):
 
         # Enqueue the durable workflow instead of sqs.send_message(). The
         # workflow may not actually run until seconds later, possibly on a
-        # different worker container. NOTE: DBOS 1.14 does not propagate OTel
-        # trace context across the enqueue, so the workflow's spans land in a
-        # separate trace from this request - see README.
+        # different worker container.
+        #
+        # `otel_context` carries this request's W3C trace context into the
+        # workflow, so the worker's spans join this trace instead of starting
+        # their own - new in DBOS 3.x, and the client-side counterpart of
+        # `PropagateOtelContext()` (which is what a process *inside* the DBOS
+        # app would wrap its enqueue in). DBOS persists the carrier in the
+        # workflow's attributes, so the link survives the queue handoff, a
+        # restart, and recovery. Only trace context travels, not baggage.
         options: EnqueueOptions = {
             "queue_name": QUEUE_NAME,
             "workflow_name": PROCESS_ORDER_WORKFLOW,
+            "otel_context": get_current_otel_context(),
         }
         await dbos_client.enqueue_async(options, order_id)
 

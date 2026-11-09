@@ -15,9 +15,51 @@ identically:
 
 `worker` and `consumer` are the two "worker flavors". **Both are DBOS apps running
 durable workflows**; only the trigger differs - the worker dequeues what the API
-enqueued, the consumer is driven by `@DBOS.kafka_consumer`. New long-running
+enqueued, the consumer is driven by `DBOS.kafka_consumer`. New long-running
 services should copy this shape (lifespan owns startup/shutdown; `/health` for
 probes), and reach for a DBOS workflow rather than a hand-rolled poll loop.
+
+### Why the workers are web services too
+
+A DBOS worker needs no HTTP port to do its job, so wrapping it in uvicorn +
+FastAPI instead of a bare `signal` + `threading.Event` runner looks like dead
+weight. Keep it anyway:
+
+1. **It is what lets the orchestrator replace a *wedged* task, not just a
+   crashed one.** ECS/Kubernetes restart a process that exits; a worker that is
+   alive but no longer dequeuing is the failure a probe exists to catch, and a
+   probe needs something to probe. This costs no load balancer: an ECS
+   container `healthCheck` runs its command *inside* the task, and under
+   `awsvpc` every container in the task shares a network namespace, so
+   `localhost` resolves. ALBs, target groups and listeners are only for
+   services that receive traffic - which a queue worker does not. Reuse the
+   urllib one-liner from `docker-compose.yml`'s healthchecks rather than
+   `curl -f ...`: `python:3.12-slim` ships no curl. Give `startPeriod` room for
+   DBOS's launch-time schema check.
+2. **One shape across all three services** - one Dockerfile pattern, one task
+   definition skeleton, one probe config, one deploy pipeline. In a fleet that
+   uniformity outweighs the handful of dependencies it costs.
+
+Also: uvicorn owns SIGTERM and PID-1 behaviour, which a bare runner makes your
+problem.
+
+**A probe is only worth having if it checks something real.** `/health`
+returning a hardcoded `{"status": "ok"}` is a *false green*: it proves uvicorn
+answers, not that DBOS is working. So:
+
+- `worker.py` reads its queue row back (system DB reachable + queue registered).
+- `consumer.py` runs a `limit=1` system-DB query.
+- `api.py` keeps the static 200 on purpose - its probe answers "can this task
+  serve traffic", and a 200 genuinely answers that.
+
+Neither worker probe can prove the dequeue loop or the Kafka poller is still
+advancing - no public API exposes that. Cover it with alerts on a liveness
+metric (time since the last completed workflow) and on consumer-group lag. The
+probe replaces a task; the metric catches a stuck fleet.
+
+The one case for dropping FastAPI from a worker: you have decided orchestrator
+health checks are not part of its story and will rely on metric alerting only.
+That is a deliberate operational choice, not a default.
 
 Workflow modules are per-service and must not be cross-imported: `workflows.py`
 only by `worker.py`, `consumer_workflows.py` only by `consumer.py` (see
@@ -91,8 +133,8 @@ fails it with "not a registered workflow function" - so `worker.py` and
 What stays per-process is the **Kafka poller**: `consumer_workflows.py`
 deliberately does NOT stack `@DBOS.kafka_consumer` on its workflow (that would
 start a poll thread in every importer, including the worker). `consumer.py`
-applies it at startup instead. Same for `Queue(QUEUE_NAME)`, instantiated only
-in `worker.py` - a process polls only the queues it registered itself.
+applies it at startup instead. Same for the queue registration, done only in
+`worker.py` - a process polls only the queues it registered itself.
 
 A new DBOS service joins this same app and database: import every workflow
 module in it too, and keep any poller/queue registration in that service's entry
@@ -146,6 +188,15 @@ container, never the app at startup.
   `docker-compose.override.yml` using `!override` on `ports` (plain lists get
   appended, not replaced) - see README.
 
+## Queues
+
+Queues live in the system database (DBOS 3.x), so they are registered **after**
+`DBOS.launch()` with `DBOS.register_queue*`, not constructed before it - 2.x's
+`Queue(name)` was removed in 3.0. In a FastAPI lifespan use the `_async`
+variant: the synchronous `DBOS.register_queue` raises `RuntimeError` when an
+event loop is running. A workflow enqueued onto a name nobody registered just
+stays `ENQUEUED`, so `constants.QUEUE_NAME` has to match on both sides.
+
 ## Delivery semantics
 
 - Kafka publish (worker): synchronous `flush()`, **raise if undelivered** so the
@@ -155,8 +206,15 @@ container, never the app at startup.
   existing ID is an upsert - so a redelivered message doesn't re-run the
   handler. At-least-once delivery, **exactly-once processing**, no offset
   bookkeeping of ours.
-  - **Don't set `enable.auto.commit: False`** - DBOS never commits manually, so
-    offsets would never advance and every restart would replay the topic.
+  - **Don't set `enable.auto.commit: False`** - DBOS stores offsets itself
+    *after* the workflow is durably enqueued and relies on auto-commit to flush
+    them, so a commit can never outrun durable state. 3.x overrides the setting
+    with a warning rather than letting offsets stall, and forces
+    `enable.auto.offset.store=False` for the same reason.
+  - Ordering is `ordering="none"|"partition"|"topic"` in 3.x (2.x's `in_order`
+    boolean is gone) - see `consumer_workflows.KAFKA_ORDERING`. A custom
+    `queue_name` is only allowed with `"none"`; ordered modes share an internal
+    partitioned queue.
   - `KAFKA_CONSUMER_GROUP` is part of the dedup key; changing it replays the
     topic under fresh IDs. That's why the upsert keeps `ON CONFLICT DO NOTHING`.
   - An unhandleable message fails its workflow and sits in the system DB with
@@ -172,6 +230,12 @@ hand-rolled signal handlers). Both DBOS services drain in-flight workflows with
 `DBOS.destroy(workflow_completion_timeout_sec=...)` before closing - for the
 consumer that also stops the Kafka poller first. Compose sets
 `stop_grace_period: 20s`; keep the drain timeout comfortably under it.
+
+The same constraint applies wherever this deploys: ECS `stopTimeout` (default
+30s, max 120s) and Kubernetes `terminationGracePeriodSeconds` must both exceed
+the drain timeout, or SIGKILL truncates it and the workflow is re-run on the
+next start. Don't set uvicorn's `timeout_graceful_shutdown` either - it would
+cut the lifespan shutdown off mid-drain.
 
 ## Local workflow
 

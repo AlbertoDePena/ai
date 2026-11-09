@@ -20,6 +20,12 @@ Three long-running services, each a uvicorn + FastAPI app with a `lifespan` and
   workflow per `*.processed` event (`consumer_workflows.py`), with a step that
   projects it into Postgres and a step that POSTs it to an external REST API.
 
+The template targets **DBOS 3.x** (`dbos[otel]==3.4.0`). Don't generate 2.x APIs
+into it: queues are `DBOS.register_queue*` **after** `DBOS.launch()` (not
+`Queue(name)` before it), Kafka ordering is `ordering="none"|"partition"|"topic"`
+(not `in_order=`), and there is no `@DBOS.scheduled`, `@DBOS.transaction` or
+`application_database_url`. See the `dbos-python` skill for the full 3.x rules.
+
 `worker` and `consumer` are two processes of **one** DBOS app; only the trigger
 differs. They share one system database (`<app>_dbos`), which is DBOS's normal
 horizontal-scaling shape - and that imposes one rule: **every process imports
@@ -145,19 +151,40 @@ always set explicitly rather than left to a default.
   migrates its own; dbmate owns the app schema. A new DBOS service joins that
   same database and app name - and must import every workflow module, or it will
   fail the work it dequeues with *"not a registered workflow function"*.
-- Consume Kafka with `@DBOS.kafka_consumer` over a hand-rolled poll loop, but do
+- **Keep the workers as uvicorn + FastAPI services; don't replace them with a
+  bare `signal` + `threading.Event` runner.** A DBOS worker needs no HTTP port,
+  but the endpoint is what lets ECS/Kubernetes replace a *wedged* task (alive,
+  no longer dequeuing) rather than only a crashed one - and it needs no load
+  balancer to do it, since an ECS container `healthCheck` runs its command
+  inside the task against `localhost`. It also keeps all three services on one
+  Dockerfile/task-definition/probe/deploy shape and leaves SIGTERM and PID-1
+  handling to uvicorn. Make the probe mean something, though: a static
+  `{"status": "ok"}` is a false green, so the worker reads its queue row back
+  and the consumer runs a `limit=1` system-DB query. Neither can prove the
+  dequeue loop or Kafka poller is advancing - alert on a liveness metric and on
+  consumer-group lag for that. The full argument is in
+  `template/CLAUDE.md` -> "Why the workers are web services too"; drop the
+  endpoint only if the user has decided orchestrator health checks aren't part
+  of the worker's story.
+- Deployment timeouts must exceed the drain: ECS `stopTimeout` /
+  Kubernetes `terminationGracePeriodSeconds` > `workflow_completion_timeout_sec`
+  (compose uses `stop_grace_period: 20s` against a 12s drain), and leave
+  uvicorn's `timeout_graceful_shutdown` unset so it can't cut the lifespan
+  shutdown short.
+- Consume Kafka with `DBOS.kafka_consumer` over a hand-rolled poll loop, but do
   **not** stack it on `@DBOS.workflow()` the way DBOS's docs show. The decorator
   registers a poll thread in whichever process imports the module, and here every
   process imports every workflow module - so the worker would become a second
   Kafka consumer. Define the workflow with `@DBOS.workflow()` alone and apply
-  `DBOS.kafka_consumer(config, topics, in_order=...)(workflow_fn)` in the
+  `DBOS.kafka_consumer(config, topics, ordering=...)(workflow_fn)` in the
   consumer's lifespan instead: the identical call, made in one process. The
   workflow still takes exactly one `KafkaMessage`, and the deterministic
   workflow ID
   (`kafka-unique-id-<topic>-<partition>-<group.id>-<offset>`) is what turns
   at-least-once delivery into exactly-once processing. Don't set
-  `enable.auto.commit: False` - DBOS never commits manually, so offsets would
-  never advance.
+  `enable.auto.commit: False` - DBOS stores offsets itself after the durable
+  enqueue and relies on auto-commit to flush them (3.x overrides the setting
+  with a warning, and forces `enable.auto.offset.store=False`).
 - Don't cross-import the workflow modules: `workflows.py` belongs to the worker,
   `consumer_workflows.py` to the consumer. Importing one into the other
   registers its workflows in the wrong process.

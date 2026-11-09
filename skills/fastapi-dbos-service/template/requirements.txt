@@ -10,8 +10,12 @@ fastapi-azure-auth==5.0.1
 # boto3 version is pinned by aioboto3's aiobotocore dependency, do not pin separately
 aioboto3==13.1.1
 
-# Durable workflows / queue, backed by Postgres
-dbos==1.14.0
+# Durable workflows / queue, backed by Postgres.
+# The [otel] extra is what lets `enable_otlp: True` work - it pulls
+# opentelemetry-instrumentation-logging, which DBOS imports to attach its
+# logger to the OTel logger provider otel_setup.py registers. Without the
+# extra, DBOS(config=...) raises ModuleNotFoundError on that import.
+dbos[otel]==3.4.0
 
 # Kafka/Redpanda. The worker produces with this directly; the consumer reaches
 # it through @DBOS.kafka_consumer, which imports confluent_kafka itself (this is
@@ -22,19 +26,17 @@ confluent-kafka==2.5.3
 # which DBOS manages itself). [pool] adds psycopg_pool.
 psycopg[binary,pool]==3.3.5
 
-# OpenTelemetry - core
-opentelemetry-sdk==1.27.0
-opentelemetry-exporter-otlp==1.27.0
-
-# pkg_resources (imported by opentelemetry-instrumentation 0.48b0) ships with
-# setuptools, which the python:3.12-slim base image does not include. Must be
-# <81 - setuptools 81 removed the bundled pkg_resources module.
-setuptools<81
+# OpenTelemetry - core. The floor here is set by dbos[otel], which requires
+# >=1.42.0; the instrumentation packages below must stay on the matching
+# 0.66b2 line. (The old setuptools<81 pin is gone: instrumentation 0.66b2 no
+# longer imports pkg_resources, so the slim image needs nothing extra.)
+opentelemetry-sdk==1.45.2
+opentelemetry-exporter-otlp==1.45.2
 
 # OpenTelemetry - auto instrumentation
-opentelemetry-instrumentation-fastapi==0.48b0
-opentelemetry-instrumentation-httpx==0.48b0
-opentelemetry-instrumentation-logging==0.48b0
+opentelemetry-instrumentation-fastapi==0.66b2
+opentelemetry-instrumentation-httpx==0.66b2
+opentelemetry-instrumentation-logging==0.66b2
 
 # Outbound HTTP (restapi.py - the consumer's downstream API call).
 httpx==0.27.2

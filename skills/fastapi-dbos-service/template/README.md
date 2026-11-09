@@ -125,18 +125,21 @@ your PATH (a standalone binary - `brew install dbmate`).
 Submit an order from the dashboard. It goes `queued -> processing -> done` over ~8s, then the
 `order.processed` event lands in Redpanda and the consumer's own DBOS workflow projects it into
 `processed_orders` (visible at `GET /processed-orders`).
-In Grafana, **Explore -> Tempo -> Search** shows the `POST /orders` request as one trace,
-the worker's DBOS workflow as a **separate** trace, and the consumer's workflow as a third.
-(Filter by `service.name` - `order-api`, `order-worker`, `order-consumer` - to tell them
-apart.)
+In Grafana, **Explore -> Tempo -> Search** shows the `POST /orders` request and the worker's
+DBOS workflow as **one** trace, and the consumer's workflow as a second one. (Filter by
+`service.name` - `order-api`, `order-worker`, `order-consumer` - to tell the services apart
+within a trace.)
 
-> **Note on trace continuity:** DBOS 1.14 does not carry OTel trace context across an
-> enqueue. `EnqueueOptions` has no `otel_context` field, the enqueue path ignores any extra
-> keys, and no `traceparent` is persisted with the workflow's Postgres row - so when the
-> worker dequeues and runs the workflow, its span starts a fresh root rather than continuing
-> the request's trace. Stitching the two into one trace would require DBOS-level support (or
-> manually persisting a `traceparent` at enqueue time and re-establishing the context on the
-> worker before the workflow runs).
+> **Trace continuity:** DBOS 3.x carries OTel trace context across an enqueue, which 1.14
+> could not. `api.py` passes `"otel_context": get_current_otel_context()` in its
+> `EnqueueOptions`; DBOS persists the W3C `traceparent` in the workflow's `attributes` column,
+> so the worker's spans parent to the originating request even though they run seconds later
+> in another container, and the link survives a restart or recovery. Inside a DBOS app the
+> equivalent is wrapping the enqueue in `with PropagateOtelContext():`. Only trace context
+> travels, not baggage, and child workflows don't inherit it automatically.
+>
+> The consumer's workflows are their own traces by design - a Kafka message has no ambient
+> request context to continue.
 
 ### Running alongside another project
 
@@ -322,11 +325,23 @@ and that clears every repo's buckets, so drop just this project's with
   (`@DBOS.step()`). This is only imported by the worker.
 - **`worker.py`** is a FastAPI app with the same shape as the API (uvicorn + lifespan +
   `/health`), so it builds, deploys, health-checks, and shuts down identically. Its lifespan
-  constructs the queue by instantiating `Queue(QUEUE_NAME)` **before** `DBOS.launch()` (that's
-  what registers it, and launch is what starts the background dequeue loop). DBOS's own
-  background threads then dequeue and execute workflows while uvicorn keeps the process alive
-  and serves the health endpoint. `consumer.py` (below) uses this same shape for a Kafka
-  consumer loop instead - started in lifespan startup, stopped on shutdown.
+  calls `DBOS.launch()` and then `await DBOS.register_queue_async(QUEUE_NAME)` - queues live in
+  the system database in DBOS 3.x, so they are registered *after* launch (2.x's
+  `Queue(QUEUE_NAME)` constructor, which had to run before it, was removed in 3.0). The
+  `_async` variant is required in a lifespan: the synchronous one raises `RuntimeError` when an
+  event loop is running. DBOS's own background threads then dequeue and execute workflows while
+  uvicorn keeps the process alive and serves the health endpoint. `consumer.py` (below) uses
+  this same shape for a Kafka consumer instead - the poller is attached in lifespan startup and
+  stopped on shutdown.
+
+  **Why a web service at all,** when a DBOS worker needs no HTTP port: it gives the
+  orchestrator something to probe, so a *wedged* task (alive, no longer dequeuing) gets
+  replaced and not just a crashed one - and it needs no load balancer to do it, since an ECS
+  container `healthCheck` runs its command inside the task against `localhost`. It also keeps all three services
+  on one Dockerfile/task-definition/probe/deploy shape, and leaves SIGTERM and PID-1 handling
+  to uvicorn. See `CLAUDE.md` -> "Why the workers are web services too" for the full argument,
+  including why both workers' `/health` assert something real instead of returning a static
+  200.
 
 The durability property: if the worker crashes mid-step, DBOS's Postgres-backed state means
 the workflow resumes from its last completed step on restart, rather than the message becoming
@@ -373,7 +388,7 @@ not a loop:
 
 ```python
 # consumer_workflows.py
-@DBOS.kafka_consumer(consumer_config(KAFKA_CONSUMER_GROUP), [KAFKA_TOPIC], in_order=False)
+@DBOS.kafka_consumer(consumer_config(KAFKA_CONSUMER_GROUP), [KAFKA_TOPIC], ordering="none")
 @DBOS.workflow()
 def process_order_event_workflow(msg: KafkaMessage) -> None:
     event = json.loads(msg.value)
@@ -419,10 +434,13 @@ of at-least-once *delivery*, with no offset bookkeeping in our code.
 
 Two consequences worth knowing:
 
-- **Don't disable auto-commit.** DBOS's loop never commits manually, so turning auto-commit off
-  would mean offsets never advance and every restart re-reads the whole topic. Durability
-  doesn't rest on the offset anymore: the poll loop writes the enqueue to Postgres before moving
-  on. (`kafka.py`'s `consumer_config()` spells this out.)
+- **Don't disable auto-commit.** DBOS stores the offset itself, only once the workflow is
+  durably enqueued, and relies on Kafka's auto-commit to flush it - so a commit can never
+  outrun durable state. Turning auto-commit off would stall offsets entirely; 3.x overrides
+  the setting with a warning rather than let that happen, and forces
+  `enable.auto.offset.store=False` for the same reason. Durability doesn't rest on the offset
+  anyway: the poll loop writes the enqueue to Postgres before moving on. (`kafka.py`'s
+  `consumer_config()` spells this out.)
 - **The consumer group id is part of the dedup key.** Changing `KAFKA_CONSUMER_GROUP`
   re-processes the topic under fresh workflow IDs. That's the deliberate way to replay a
   topic - and the reason `save_processed_order_step` keeps its `ON CONFLICT DO NOTHING`.
@@ -431,13 +449,19 @@ A message that can never be handled (bad JSON, a permanent 400 downstream) fails
 and is left in the system DB with status `ERROR` - an inspectable dead letter you can query or
 replay with the DBOS CLI - while the consumer moves on instead of spinning on one offset.
 
-`in_order=False` lets workflows for different messages run concurrently, which is what you want
-for an idempotent projection. Set `KAFKA_IN_ORDER = True` in `consumer_workflows.py` and DBOS
-gives the topic a dedicated queue with `concurrency=1`, processing strictly in offset order -
-correct when later events overwrite earlier ones for the same key, slower otherwise. (It
-doesn't work with regex topic selectors.) Either way, scale out by running more `consumer`
-replicas: they share one Kafka consumer group, so Kafka splits the topic's partitions across
-them.
+`ordering="none"` lets workflows for different messages run concurrently, which is what you want
+for an idempotent projection. DBOS 3.x replaced 2.x's `in_order` boolean with three modes, set
+via `KAFKA_ORDERING` in `consumer_workflows.py`:
+
+| `ordering` | Behaviour |
+|---|---|
+| `"none"` (default here) | No ordering; messages processed concurrently. The only mode that accepts a custom `queue_name`. |
+| `"partition"` | Ordered within each Kafka partition, parallel across partitions - usually what you want when order matters, since Kafka only guarantees per-partition order anyway. |
+| `"topic"` | Strictly ordered across the whole topic (closest to 2.x `in_order=True`). Correct when later events overwrite earlier ones for a key that isn't the partition key; no parallelism. |
+
+Ordered modes share an internal partitioned queue, which is why they can't be combined with a
+custom queue. Either way, scale out by running more `consumer` replicas: they share one Kafka
+consumer group, so Kafka splits the topic's partitions across them.
 
 #### Why one DBOS system database
 
@@ -456,7 +480,8 @@ Two mechanisms hand a process work it did not start:
   `executor_id` defaults to `"local"` in every process that doesn't set `DBOS__VMID`, so both
   services match the same rows.
 - **The internal queue.** `@DBOS.kafka_consumer` doesn't run the workflow inline; it *enqueues*
-  it onto DBOS's internal queue (or a per-topic queue when `in_order=True`), and every process
+  it onto DBOS's internal queue (or the shared partitioned queue when `ordering` is
+  `"partition"`/`"topic"`), and every process
   polls the internal queue.
 
 A process that dequeues or recovers a workflow it never registered fails it with *"... is not a
@@ -473,7 +498,7 @@ decorator makes - so exactly one process polls the topic while both can run the 
 messages produce.
 
 Only the queue-driven side is still asymmetric by registration: `worker.py` instantiates
-`Queue(QUEUE_NAME)`, and a process only polls queues it registered itself, so `orders_queue`
+`DBOS.register_queue_async(QUEUE_NAME)`, and a process only polls queues it registered itself, so `orders_queue`
 work runs on the worker. The consumer can still *recover* such a workflow after a crash, which
 is exactly why it registers the function.
 

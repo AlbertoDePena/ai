@@ -13,6 +13,7 @@ import logging
 import os
 
 from opentelemetry import metrics, trace
+from opentelemetry._logs import set_logger_provider
 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -67,6 +68,14 @@ def configure_otel() -> None:
     logger_provider.add_log_record_processor(
         BatchLogRecordProcessor(OTLPLogExporter(endpoint=OTLP_ENDPOINT, insecure=True))
     )
+    # Register it globally, the same way the tracer and meter providers are
+    # above. DBOS reads the *global* logger provider when enable_otlp=True and
+    # attaches its own handler to it; without this it finds a
+    # ProxyLoggerProvider, logs "OTLP is enabled but logger provider not set,
+    # skipping log exporter setup", and every DBOS log line is missing from
+    # Loki. (dbos_logger sets propagate=False, so it does not double up with
+    # the root handler below.)
+    set_logger_provider(logger_provider)
     otel_handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
 
     root_logger = logging.getLogger()
