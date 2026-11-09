@@ -11,6 +11,7 @@ else in this file changes.
 
 import logging
 import os
+import socket
 
 from opentelemetry import metrics, trace
 from opentelemetry._logs import set_logger_provider
@@ -42,6 +43,12 @@ def configure_otel() -> None:
         {
             "service.name": SERVICE_NAME,
             "deployment.environment": os.environ.get("ENVIRONMENT", "local"),
+            # Which replica this is. Without it every task of a service shares
+            # one series and per-process metrics (dbos_metrics.py's liveness
+            # gauge) can't be told apart. DBOS__VMID is the same variable DBOS
+            # uses for its executor_id, so set it once per task - to the ECS
+            # task id or the pod name - and both agree.
+            "service.instance.id": os.environ.get("DBOS__VMID") or socket.gethostname(),
         }
     )
 

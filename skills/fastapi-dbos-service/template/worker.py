@@ -78,6 +78,7 @@ otel_setup.configure_otel()
 # (E402 on these four: they deliberately follow configure_otel() above, the same
 # way consumer.py orders its imports.)
 import consumer_workflows  # noqa: F401,E402
+import dbos_metrics  # noqa: E402
 import workflows  # noqa: F401,E402
 from constants import APP_NAME, QUEUE_NAME  # noqa: E402
 from kafka import close_producer  # noqa: E402
@@ -111,6 +112,12 @@ async def lifespan(app: FastAPI):
     # RuntimeError when called from a running event loop, which a FastAPI
     # lifespan always is.
     await DBOS.register_queue_async(QUEUE_NAME)
+
+    # Schedules also live in the system database, so this is post-launch too.
+    # Applied here and nowhere else - like the consumer's Kafka poller, one
+    # owner - though the workflow it enqueues may run on any replica.
+    dbos_metrics.apply_schedule()
+
     DBOS.logger.info("Worker launched, listening on queue '%s'", QUEUE_NAME)
 
     yield

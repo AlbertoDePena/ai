@@ -20,6 +20,10 @@ Three long-running services, each a uvicorn + FastAPI app with a `lifespan` and
   workflow per `*.processed` event (`consumer_workflows.py`), with a step that
   projects it into Postgres and a step that POSTs it to an external REST API.
 
+`dbos_metrics.py` adds fleet metrics on top: app-wide workflow counts by status
+(sampled by a scheduled DBOS workflow) and a per-process liveness gauge. Keep
+both shapes - see the Notes.
+
 The template targets **DBOS 3.x** (`dbos[otel]==3.4.0`). Don't generate 2.x APIs
 into it: queues are `DBOS.register_queue*` **after** `DBOS.launch()` (not
 `Queue(name)` before it), Kafka ordering is `ordering="none"|"partition"|"topic"`
@@ -166,6 +170,18 @@ always set explicitly rather than left to a default.
   `template/CLAUDE.md` -> "Why the workers are web services too"; drop the
   endpoint only if the user has decided orchestrator health checks aren't part
   of the worker's story.
+- **Keep the two metric shapes in `dbos_metrics.py` distinct.** App-wide counts
+  (`dbos.workflows`, `dbos.workflows.completed`) come from a *scheduled DBOS
+  workflow*, because a schedule is owned by the application: one workflow per
+  tick no matter how many replicas, which is right for app-wide numbers.
+  Per-process liveness (`dbos.worker.idle`) must NOT be a scheduled workflow for
+  the same reason - one beat per tick proves "some task is alive", never "every
+  task is alive" - so it is an observable gauge every replica reports, keyed by
+  `service.instance.id` (set `DBOS__VMID` per task). Alert on both at once
+  (`dbos_worker_idle_seconds > 300 and on() max(dbos_workflows{status="ENQUEUED"}) > 0`);
+  either alone is useless. Name metrics without a `_seconds` suffix (the OTLP ->
+  Prometheus translation appends one for `unit="s"`) and give counts a braced
+  unit like `{workflow}` (`unit="1"` appends `_ratio`).
 - Deployment timeouts must exceed the drain: ECS `stopTimeout` /
   Kubernetes `terminationGracePeriodSeconds` > `workflow_completion_timeout_sec`
   (compose uses `stop_grace_period: 20s` against a 12s drain), and leave

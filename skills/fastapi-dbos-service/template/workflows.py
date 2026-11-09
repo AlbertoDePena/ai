@@ -18,6 +18,7 @@ import time
 import boto3
 from dbos import DBOS
 
+import dbos_metrics
 import otel_setup
 from constants import BUCKET_NAME
 from kafka import publish_order_processed
@@ -95,3 +96,7 @@ def process_order_workflow(order_id: str) -> None:
     send_confirmation_email_step(
         order_id, record["created_by"], record["item"], record["quantity"]
     )
+    # Per-process liveness: proves THIS replica is still draining the queue,
+    # which neither /health nor the app-wide gauges can show. Not a step on
+    # purpose - see dbos_metrics.record_workflow_completed.
+    dbos_metrics.record_workflow_completed()

@@ -44,6 +44,7 @@ import logging
 from typing import Literal
 
 import appdb
+import dbos_metrics
 import otel_setup
 import restapi
 from dbos import DBOS, KafkaMessage
@@ -155,3 +156,5 @@ def process_order_event_workflow(msg: KafkaMessage) -> None:
 
     save_processed_order_step(order_id, event["item"], event["quantity"])
     notify_downstream_step(order_id, event["item"], event["quantity"])
+    # Per-process liveness - see dbos_metrics.record_workflow_completed.
+    dbos_metrics.record_workflow_completed()

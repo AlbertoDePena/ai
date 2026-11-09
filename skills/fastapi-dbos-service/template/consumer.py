@@ -51,6 +51,7 @@ otel_setup.configure_otel()
 # workflows for the queue-driven one the worker normally runs: this process can
 # still be handed either by recovery or the internal queue.
 import consumer_workflows  # noqa: E402
+import dbos_metrics  # noqa: F401,E402
 import workflows  # noqa: F401,E402
 
 import appdb  # noqa: E402

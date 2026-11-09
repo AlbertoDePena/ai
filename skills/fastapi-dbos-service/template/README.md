@@ -112,8 +112,9 @@ your PATH (a standalone binary - `brew install dbmate`).
 > encoding table.
 
 - **API**: http://localhost:8000/dashboard (health at http://localhost:8000/health)
-- **Worker health**: http://localhost:8001/health
-- **Consumer health**: http://localhost:8002/health
+- **Worker health**: http://localhost:8001/health - returns the queue it's serving, and 503 if
+  it can't reach the system database or the queue isn't registered
+- **Consumer health**: http://localhost:8002/health - 503 if it can't reach the system database
 - **Grafana** (traces/metrics/logs, via otel-lgtm): http://localhost:3000 - no login; traces
   are in Tempo, logs in Loki, metrics in Prometheus, all pre-wired as datasources
 - **Silo console** (browse the bucket): http://localhost:9001 - sign in with the
@@ -125,6 +126,44 @@ your PATH (a standalone binary - `brew install dbmate`).
 Submit an order from the dashboard. It goes `queued -> processing -> done` over ~8s, then the
 `order.processed` event lands in Redpanda and the consumer's own DBOS workflow projects it into
 `processed_orders` (visible at `GET /processed-orders`).
+### Fleet metrics
+
+Beyond the domain metrics (`orders.processed`, `orders.processing_duration_seconds`,
+`orders.events_projected`), `dbos_metrics.py` exports three that describe the DBOS runtime
+itself. They're named `dbos.*`, not `<entity>.*`, so re-theming the template leaves them alone.
+
+| Prometheus name | Shape | Labels | Answers |
+|---|---|---|---|
+| `dbos_workflows` | gauge | `status` | How much is in flight app-wide (`PENDING`/`ENQUEUED`/`DELAYED`) - the input for autoscaling on queue depth |
+| `dbos_workflows_completed` | gauge | `status`, `window` | What finished in the last 15m, by terminal status - `ERROR` climbing is the signal |
+| `dbos_worker_idle_seconds` | gauge | `ever_completed`, `service_instance_id` | How long since **this** replica completed a workflow |
+
+The first two are sampled from the system database by a scheduled DBOS workflow
+(`* * * * *`, override with `DBOS_METRICS_SCHEDULE`). A schedule belongs to the *application*,
+so one workflow is enqueued per tick no matter how many replicas run - correct for app-wide
+counts, and the reason the third metric can't work the same way: one beat per tick proves "some
+task is alive", never "every task is alive". So `dbos_worker_idle_seconds` is an observable
+gauge every replica reports on every export interval. Set `DBOS__VMID` per task (ECS task id,
+pod name) so `service.instance.id` tells the replicas apart - it's the same variable DBOS uses
+for `executor_id`.
+
+Alerting needs both halves, because each alone is useless - "work is waiting and this replica
+has completed nothing":
+
+```promql
+dbos_worker_idle_seconds > 300
+  and on() max(dbos_workflows{status="ENQUEUED"}) > 0
+```
+
+Without the second clause it fires on any idle fleet; without the first it never fires. This
+covers what `/health` deliberately can't: the probe proves the process answers and can reach
+the system database, not that its dequeue loop is still advancing. Probe replaces a task, alert
+catches a stuck fleet.
+
+Note the sampling workflow does **not** count toward `dbos_worker_idle_seconds` - only the
+business workflows call `record_workflow_completed()`. A worker whose scheduler is fine but
+whose queue has stalled is precisely the case this has to catch.
+
 In Grafana, **Explore -> Tempo -> Search** shows the `POST /orders` request and the worker's
 DBOS workflow as **one** trace, and the consumer's workflow as a second one. (Filter by
 `service.name` - `order-api`, `order-worker`, `order-consumer` - to tell the services apart

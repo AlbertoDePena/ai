@@ -61,9 +61,11 @@ The one case for dropping FastAPI from a worker: you have decided orchestrator
 health checks are not part of its story and will rely on metric alerting only.
 That is a deliberate operational choice, not a default.
 
-Workflow modules are per-service and must not be cross-imported: `workflows.py`
-only by `worker.py`, `consumer_workflows.py` only by `consumer.py` (see
-"Databases" for why).
+Every process imports **every** workflow module (`workflows.py`,
+`consumer_workflows.py`, `dbos_metrics.py`) - they are one DBOS app sharing one
+system database, so either process can be handed work the other started (see
+"Databases"). What stays per-process is the *trigger*: the worker applies the
+queue and schedule registrations, the consumer attaches the Kafka poller.
 
 ## Module naming: name for the tech, not the role
 
@@ -187,6 +189,50 @@ container, never the app at startup.
   collide with each other on 8000-8002; the fix is a
   `docker-compose.override.yml` using `!override` on `ports` (plain lists get
   appended, not replaced) - see README.
+
+## Metrics
+
+`dbos_metrics.py` carries the two fleet metrics, and they are deliberately two
+different shapes:
+
+- **App-wide counts** (`dbos.workflows` by status, `dbos.workflows.completed` in
+  a 15m window) come from a **scheduled DBOS workflow** that counts rows in the
+  system database. A schedule is owned by the application, not the process, so
+  one workflow is enqueued per tick and whichever replica dequeues it samples -
+  which is exactly right for numbers that are app-wide. These are the input for
+  autoscaling on queue depth.
+- **Per-process liveness** (`dbos.worker.idle`) is an **observable gauge**, not
+  a scheduled workflow, for the same reason inverted: one beat per tick across
+  the app proves "some task is alive", never "every task is alive". Every
+  replica reports it every export interval, keyed by `service.instance.id` -
+  so set `DBOS__VMID` per task (ECS task id / pod name), which is also DBOS's
+  own `executor_id`.
+
+`record_workflow_completed()` is called at the end of each workflow and is
+deliberately **not** a step: a replay re-records it, which is correct, since a
+replay means the process really is working. It's the one global that escapes the
+"don't mutate globals in a workflow" rule - nothing reads it back to make a
+decision, and it can't affect a workflow's result.
+
+The alert needs both halves - "work is waiting and this replica has done
+nothing":
+
+```promql
+dbos_worker_idle_seconds > 300
+  and on() max(dbos_workflows{status="ENQUEUED"}) > 0
+```
+
+Without the second clause it fires on any idle fleet; without the first it never
+fires. This is the gap `/health` leaves open on purpose: the probe proves the
+process answers and can reach the system database, not that its dequeue loop is
+advancing.
+
+**Metric naming:** the OTLP -> Prometheus translation appends `_seconds` for
+`unit="s"`, so name it `dbos.worker.idle`, not `...idle_seconds`, or you get
+`dbos_worker_idle_seconds_seconds`. Counts take a braced unit (`{workflow}`),
+which the translation strips; `unit="1"` would append `_ratio`. These metrics
+are named `dbos.*` rather than `<entity>.*` on purpose - they describe the
+runtime, not the domain, so re-theming the template leaves them alone.
 
 ## Queues
 
